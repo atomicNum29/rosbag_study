@@ -3,11 +3,14 @@ name = "python-workspace"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "matplotlib>=3.10.7",
-    "opencv-python>=5.0.0.93",
+    "numpy>=1.26.4,<2",
+    "opencv-python>=4.11,<4.12",
     "pandas>=3.0.5",
     "pyarrow>=25.0.1",
+    "pyqtgraph>=0.14.0",
+    "pyside6>=6.11.2",
     "pyyaml>=6.0.3",
 ]
