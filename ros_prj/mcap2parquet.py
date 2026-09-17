@@ -6,7 +6,7 @@ from rosidl_runtime_py.utilities import get_message
 import cv2
 from cv_bridge import CvBridge
 
-bag_path = "/home/cu/rosbag_2026-09-12_2/"
+bag_path = "rosbag_data/rosbag_2026-09-17_2"
 
 reader = rosbag2_py.SequentialReader()
 
@@ -26,59 +26,73 @@ for topic in topics:
 gyro_data = []
 accel_data = []
 image_data = []
+motor_data = []
 
 bridge = CvBridge()
 
 while reader.has_next():
     topic, data, timestamp = reader.read_next()
 
-    if topic == "/camera/fisheye1/image_raw":
-        msg_type = get_message("sensor_msgs/msg/Image")
+    if topic == "/motor_bridge_node/status":
+        msg_type = get_message("std_msgs/msg/String")
         msg = deserialize_message(data, msg_type)
-        img = bridge.imgmsg_to_cv2(msg)
-        image_data.append(
+        motor_data.append(
+            {
+                "timestamp": timestamp * 1e-9,  # Convert nanoseconds to seconds
+                "message": msg.data,
+            }
+        )
+
+    # if topic == "/camera/fisheye1/image_raw":
+    #     msg_type = get_message("sensor_msgs/msg/Image")
+    #     msg = deserialize_message(data, msg_type)
+    #     img = bridge.imgmsg_to_cv2(msg)
+    #     image_data.append(
+    #         {
+    #             "timestamp": timestamp * 1e-9,  # Convert nanoseconds to seconds
+    #             "sensor_time": msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+    #             "image": img,
+    #         }
+    #     )
+    #     continue
+    if topic == "/camera/gyro/sample":
+        msg_type = get_message("sensor_msgs/msg/Imu")
+        msg = deserialize_message(data, msg_type)
+        gyro_data.append(
             {
                 "timestamp": timestamp * 1e-9,  # Convert nanoseconds to seconds
                 "sensor_time": msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
-                "image": img,
+                "angular_velocity": {
+                    "x": msg.angular_velocity.x,
+                    "y": msg.angular_velocity.y,
+                    "z": msg.angular_velocity.z,
+                },
             }
         )
         continue
-    # if topic == "/camera/gyro/sample":
-    #     msg_type = get_message("sensor_msgs/msg/Imu")
-    #     msg = deserialize_message(data, msg_type)
-    #     gyro_data.append(
-    #         {
-    #             "timestamp": timestamp * 1e-9,  # Convert nanoseconds to seconds
-    #             "sensor_time": msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
-    #             "angular_velocity": {
-    #                 "x": msg.angular_velocity.x,
-    #                 "y": msg.angular_velocity.y,
-    #                 "z": msg.angular_velocity.z,
-    #             },
-    #         }
-    #     )
-    #     continue
-    # if topic == "/camera/accel/sample":
-    #     msg_type = get_message("sensor_msgs/msg/Imu")
-    #     msg = deserialize_message(data, msg_type)
-    #     accel_data.append(
-    #         {
-    #             "timestamp": timestamp * 1e-9,  # Convert nanoseconds to seconds
-    #             "sensor_time": msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
-    #             "linear_acceleration": {
-    #                 "x": msg.linear_acceleration.x,
-    #                 "y": msg.linear_acceleration.y,
-    #                 "z": msg.linear_acceleration.z,
-    #             },
-    #         }
-    #     )
-    #     continue
+    if topic == "/camera/accel/sample":
+        msg_type = get_message("sensor_msgs/msg/Imu")
+        msg = deserialize_message(data, msg_type)
+        accel_data.append(
+            {
+                "timestamp": timestamp * 1e-9,  # Convert nanoseconds to seconds
+                "sensor_time": msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9,
+                "linear_acceleration": {
+                    "x": msg.linear_acceleration.x,
+                    "y": msg.linear_acceleration.y,
+                    "z": msg.linear_acceleration.z,
+                },
+            }
+        )
+        continue
 
 import pandas as pd
 
-# df = pd.DataFrame(gyro_data)
-# df.to_parquet("gyro_data_2.parquet", engine="pyarrow", index=False)
+df = pd.DataFrame(gyro_data)
+df.to_parquet("rosbag_data/gyro_data_09-17.parquet", engine="pyarrow", index=False)
 
-# df = pd.DataFrame(accel_data)
-# df.to_parquet("accel_data_2.parquet", engine="pyarrow", index=False)
+df = pd.DataFrame(accel_data)
+df.to_parquet("rosbag_data/accel_data_09-17.parquet", engine="pyarrow", index=False)
+
+df = pd.DataFrame(motor_data)
+df.to_parquet("rosbag_data/motor_data_09-17.parquet", engine="pyarrow", index=False)
