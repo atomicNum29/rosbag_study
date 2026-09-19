@@ -20,13 +20,17 @@ def main():
     parser.add_argument("--timestamp", choices=("header", "record"), default="header")
     parser.add_argument("--cache-mib", type=int, default=64)
     parser.add_argument("--temp-dir", help="Directory for temporary serialized camera data")
+    parser.add_argument("--motor-topic", default="/motor_bridge_node/status",
+                        help="Optional JSON motor telemetry topic (auto-enabled when present)")
+    parser.add_argument("--no-motor", action="store_true", help="Disable motor telemetry graphs")
     args = parser.parse_args()
     if args.cache_mib < 0:
         parser.error("--cache-mib must be nonnegative")
     gyro, accel = default_series()
     config = ViewerConfig(args.image_topic,
                           (replace(gyro, topic=args.gyro_topic), replace(accel, topic=args.accel_topic)),
-                          args.timestamp, args.cache_mib * 1024**2, args.temp_dir)
+                          args.timestamp, args.cache_mib * 1024**2, args.temp_dir,
+                          None if args.no_motor else args.motor_topic)
     from PySide6.QtWidgets import QApplication
     from rosbag_viewer.window import MainWindow
     app = QApplication(sys.argv[:1])

@@ -27,6 +27,42 @@ uv run python rosbag_viewer/main.py /path/to/bag_directory
 uv add 'numpy>=1.26.4,<2' 'opencv-python>=4.11,<4.12' pyside6 pyqtgraph
 ```
 
+## 밝은 테마와 그래프 구성
+
+전체 UI는 운영체제의 다크 모드와 무관하게 밝은 테마를 사용하며, 그래프 배경은 흰색입니다. 범례는 그래프 위의 별도 줄에 표시되어 데이터를 가리지 않습니다. 범례 체크박스로 각 축/바퀴의 선을 개별적으로 켜고 끌 수 있습니다.
+
+- **IMU**: gyro / accel
+- **Wheels**: 네 바퀴 RPM / 전류[A]
+- **Motor**: 네 바퀴 제어 출력[raw] / 드라이버 A·B 전압[V]
+- **All / Compare**: 모든 센서 그래프를 한 화면에서 스크롤하며 비교
+
+`Visible graphs` 메뉴에서 필요한 그래프만 남길 수 있습니다. 예를 들어 All / Compare에서 gyro와 Wheel RPM만 선택하면 함께 비교할 수 있습니다. `Show camera`를 끄면 그래프 공간을 넓힐 수 있습니다. 모든 탭의 시간축 확대·이동 및 현재 시각은 동기화됩니다. 그래프가 많아도 영상과 하단 재생 컨트롤은 스크롤되지 않습니다. bag을 다시 열면 그래프 선택은 초기화됩니다.
+
+### 휠 데이터 자동 인식
+
+`/motor_bridge_node/status` (`std_msgs/msg/String`)가 있으면 motor bridge JSON 텔레메트리를 자동으로 읽습니다. 이 토픽이 없는 기존 bag도 그대로 열 수 있습니다.
+
+```bash
+uv run python -m rosbag_viewer rosbag_data/rosbag_2026-09-17_2/
+# 다른 토픽 이름
+uv run python -m rosbag_viewer /path/to/bag --motor-topic /custom/status
+# 모터 데이터 제외
+uv run python -m rosbag_viewer /path/to/bag --no-motor
+```
+
+실제 기록 형식에 맞춘 매핑은 `config.py`의 `motor_series()`에 있습니다.
+
+| 그래프 | JSON 필드 | 변환 |
+| --- | --- | --- |
+| RPM | `wheels.{lf,rf,lr,rr}.rpm` | 원래 RPM |
+| 전류 | `wheels.{lf,rf,lr,rr}.current_deci_amp` | ×0.1 → A |
+| 제어 출력 | `wheels.{lf,rf,lr,rr}.controller_output` | 원시값; 퍼센트로 추정하지 않음 |
+| 전압 | `drivers.{a,b}.voltage_mv` | ×0.001 → V |
+
+LF/RF/LR/RR는 각각 앞왼쪽/앞오른쪽/뒤왼쪽/뒤오른쪽입니다. `valid`가 false이거나 필드가 없으면 NaN으로 두어 선을 끊습니다. 잘못된 JSON 메시지도 빈 구간으로 두고 상태 표시줄에 횟수를 알립니다. JSON은 메시지당 한 번 파싱합니다.
+
+String에는 센서 header가 없으므로 **bag record timestamp**로 카메라·IMU와 동기화합니다. 상태 표시줄의 record timestamp 사용 횟수는 이 토픽에서 정상적으로 표시됩니다. 센서의 전송 지연 자체를 보정하지는 않습니다.
+
 ## 토픽과 시간 설정
 
 기본 토픽은 다음과 같습니다.
@@ -86,7 +122,8 @@ Qt timer는 약 60 Hz로 UI를 갱신하고, 재생 위치는 monotonic clock의
 | `config.py` | 기본 토픽, timestamp 모드, 캐시 예산, `SeriesSpec` |
 | `data.py` | `BagDataSource`, `TimeSeriesData` (`ImuData` 별칭), `ImageSource`, 디스크 인덱스와 LRU |
 | `playback.py` | monotonic clock 재생, 공통 seek, 프레임 이동, 시간 포맷 |
-| `window.py` | 비동기 bag 로딩, 영상, 범용 시계열 그래프, 컨트롤, 이벤트 동기화 |
+| `window.py` | 비동기 로딩, 영상, 그룹 탭·비교 화면, 외부 범례, 컨트롤, 이벤트 동기화 |
+| `theme.py` | 밝은 Qt 팔레트 |
 | `main.py`, `__main__.py` | CLI 및 앱 진입점 |
 | `tests/test_viewer.py` | ROS 없이 수행하는 코어 및 offscreen GUI 회귀 테스트 |
 | `tests/test_ros_integration.py` | 실제 ROS 직렬화/MCAP 생성·로드·디코딩 통합 테스트 |
@@ -105,7 +142,7 @@ config = ViewerConfig(series=default_series() + (
 # MainWindow(config)로 실행. header가 없는 Twist는 record timestamp를 사용합니다.
 ```
 
-현재 필드 접근은 점으로 구분된 숫자 속성을 지원합니다. 가변 길이 배열/복합 변환이 필요한 타입은 `field_value` 또는 별도 extractor 확장이 필요합니다.
+필드는 점으로 구분된 숫자 속성 및 `data[0]` 같은 배열 인덱스를 지원합니다. `SeriesSpec.group`으로 탭, `scales`로 필드별 단위 배율, `payload="json"`으로 JSON 필드 접근, `validity_fields`로 값의 유효성 필드를 지정할 수 있습니다. 복합 변환이 필요한 타입은 별도 extractor 확장이 필요합니다.
 
 ## 검증
 
@@ -119,3 +156,5 @@ GUI 테스트는 offscreen 모드로 실행합니다. ROS가 없으면 MCAP 통�
 API 참고: [rosbag2 SequentialReader 테스트](https://github.com/ros2/rosbag2/blob/rolling/rosbag2_py/test/test_sequential_reader.py), [Qt QSignalBlocker](https://doc.qt.io/qtforpython-6/PySide6/QtCore/QSignalBlocker.html).
 
 이 작업 환경에서 ROS Jazzy를 source한 상태로 6개 테스트를 통과했습니다. 기존 `/home/cu/rosbag_2026-09-12_2` (3.5GB)를 offscreen GUI로 열어 영상 2,689개, gyro 17,923개, accel 5,553개, 상대시간 약 89.681초를 확인했습니다. 로딩 약 11.7초, 임의 여섯 위치 탐색 총 약 0.036초, 프로세스 최대 RSS 약 240MiB였습니다. 이는 해당 환경의 관측값이며 일반 성능 보장은 아닙니다. 실제 데스크톱에서 마우스로 조작하는 수동 검증은 별도로 필요합니다.
+
+2026-09-17 확장 검증: `rosbag_data/rosbag_2026-09-17_2/`를 offscreen GUI에서 열어 영상 6,990개 및 motor 상태 23,301개를 확인했습니다. 4개 모터 그래프의 실제 값 범위는 RPM -173~229, 전류 0~5.7A, 제어 출력 -2421~2971, 전압 25.9~26.8V였습니다. 단위 변환·유효성 처리·잘못된 JSON·토픽 자동 인식/비활성화·탭 이동·비교 화면·선/그래프 숨김·탭 사이 시간축 동기화 테스트를 추가했습니다.

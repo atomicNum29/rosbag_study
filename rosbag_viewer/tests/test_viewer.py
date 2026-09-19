@@ -8,8 +8,8 @@ from types import SimpleNamespace
 import numpy as np
 from PySide6.QtWidgets import QApplication
 
-from rosbag_viewer.config import ViewerConfig
-from rosbag_viewer.data import ImageSource, sensor_timestamp, TimeSeriesData
+from rosbag_viewer.config import ViewerConfig, motor_series
+from rosbag_viewer.data import ImageSource, sensor_timestamp, TimeSeriesData, series_values, field_value
 from rosbag_viewer.playback import PlaybackController, format_time
 from rosbag_viewer.window import MainWindow
 
@@ -48,6 +48,27 @@ class ImageTests(unittest.TestCase):
         self.assertEqual(sensor_timestamp(msg, 99, "header"), (99, True))
         self.assertEqual(format_time(59.9996), "01:00.000")
         self.assertEqual(format_time(95.824), "01:35.824")
+
+
+class MotorTests(unittest.TestCase):
+    def test_units_validity_and_missing_values(self):
+        rpm, current, output, voltage = motor_series("/motor_bridge_node/status")
+        payload = {
+            "wheels": {
+                "lf": {"valid": True, "rpm": -120, "current_deci_amp": 23, "controller_output": 50},
+                "rf": {"valid": False, "rpm": 200, "current_deci_amp": 99},
+                "lr": {"valid": True, "rpm": 80, "current_deci_amp": -5},
+            },
+            "drivers": {"a": {"valid": True, "voltage_mv": 26500},
+                        "b": {"valid": False, "voltage_mv": 27000}},
+        }
+        np.testing.assert_allclose(series_values(payload, rpm), [-120, np.nan, 80, np.nan])
+        np.testing.assert_allclose(series_values(payload, current), [2.3, np.nan, -0.5, np.nan])
+        np.testing.assert_allclose(series_values(payload, voltage), [26.5, np.nan])
+        self.assertTrue(np.isnan(series_values({}, output)).all())
+        self.assertTrue(np.isnan(series_values({"wheels": None}, rpm)).all())
+        self.assertEqual(field_value(SimpleNamespace(data=[3, 4]), "data[1]"), 4)
+        self.assertTrue(np.isnan(field_value(SimpleNamespace(data=[]), "data[0]")))
 
 
 class PlaybackTests(unittest.TestCase):
@@ -93,6 +114,33 @@ class PlaybackTests(unittest.TestCase):
 
 
 class WindowTests(unittest.TestCase):
+    def test_tabs_comparison_visibility_and_linked_ranges(self):
+        config = ViewerConfig(series=ViewerConfig().series + motor_series("/motor_bridge_node/status"))
+        window = MainWindow(config)
+        window.show()
+        APP.processEvents()
+        self.assertEqual([window.graph_tabs.tabText(i) for i in range(4)],
+                         ["IMU", "Wheels", "Motor", "All / Compare"])
+        window.graph_tabs.setCurrentIndex(1)
+        APP.processEvents()
+        window.plots[2].setXRange(10, 20, padding=0)
+        for plot in window.plots:
+            np.testing.assert_allclose(plot.viewRange()[0], [10, 20])
+        window.legend_checks[2][0].setChecked(False)
+        self.assertFalse(window.plots[2].curves[0].isVisible())
+        window.graph_actions[1].setChecked(False)
+        window.graph_tabs.setCurrentIndex(3)
+        APP.processEvents()
+        self.assertIs(window.graph_cards[2].parentWidget(), window.compare_column.parentWidget())
+        self.assertTrue(window.graph_cards[1].isHidden())
+        window.graph_tabs.setCurrentIndex(0)
+        APP.processEvents()
+        self.assertIs(window.graph_cards[2].parentWidget(), window.card_columns[2].parentWidget())
+        self.assertTrue(window.graph_cards[1].isHidden())
+        window.video_toggle.setChecked(False)
+        self.assertTrue(window.video.isHidden())
+        window.close()
+
     def test_seek_synchronizes_without_recursive_signals(self):
         config = ViewerConfig()
         window = MainWindow(config)

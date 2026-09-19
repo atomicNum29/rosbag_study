@@ -1,5 +1,6 @@
 """Create a real MCAP fixture with ROS serialization and read/decode it."""
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -16,6 +17,53 @@ ROS_AVAILABLE = all(importlib.util.find_spec(name) for name in
 
 @unittest.skipUnless(ROS_AVAILABLE, "Source ROS2 to run MCAP integration tests")
 class RosIntegrationTests(unittest.TestCase):
+    def test_motor_json_autodetection_and_invalid_payload_gaps(self):
+        import rosbag2_py
+        from rclpy.serialization import serialize_message
+        from sensor_msgs.msg import Image
+        from std_msgs.msg import String
+        config = ViewerConfig(series=())
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "bag")
+            writer = rosbag2_py.SequentialWriter()
+            writer.open(rosbag2_py.StorageOptions(uri=path, storage_id="mcap"),
+                        rosbag2_py.ConverterOptions("cdr", "cdr"))
+            for i, (name, kind) in enumerate(((config.image_topic, "sensor_msgs/msg/Image"),
+                                               (config.motor_topic, "std_msgs/msg/String"))):
+                writer.create_topic(rosbag2_py.TopicMetadata(
+                    id=i, name=name, type=kind, serialization_format="cdr"))
+            image = Image()
+            image.header.stamp.sec = 100
+            image.width = image.height = image.step = 1
+            image.encoding = "mono8"
+            image.data = [0]
+            writer.write(config.image_topic, serialize_message(image), 100_000_000_000)
+            payload = {"wheels": {"lf": {"valid": True, "rpm": -150, "current_deci_amp": 31}},
+                       "drivers": {"a": {"valid": True, "voltage_mv": 26700}}}
+            for i, text in enumerate((json.dumps(payload), "not json", "[]")):
+                writer.write(config.motor_topic, serialize_message(String(data=text)),
+                             100_000_000_000 + (i + 1) * 1_000_000)
+            del writer
+            source = BagDataSource(config)
+            try:
+                source.load(path)
+                self.assertEqual(len(source.series), 4)
+                rpm, current, output, voltage = source.series
+                self.assertEqual(rpm.values[0, 0], -150)
+                self.assertAlmostEqual(current.values[0, 0], 3.1)
+                self.assertAlmostEqual(voltage.values[0, 0], 26.7)
+                self.assertTrue(np.isnan(current.values[1:]).all())
+                np.testing.assert_allclose(current.time, [0.001, 0.002, 0.003])
+                self.assertTrue(any("2 invalid JSON" in text for text in source.warnings))
+            finally:
+                source.close()
+            disabled = BagDataSource(replace(config, motor_topic=None))
+            try:
+                disabled.load(path)
+                self.assertEqual(disabled.series, [])
+            finally:
+                disabled.close()
+
     def test_mcap_roundtrip_and_shared_imu_topic(self):
         import rosbag2_py
         from rclpy.serialization import serialize_message

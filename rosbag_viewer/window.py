@@ -7,10 +7,12 @@ from PySide6.QtGui import QImage, QPixmap, QShortcut, QKeySequence
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QSlider, QComboBox, QFileDialog, QMessageBox, QSplitter,
+    QTabWidget, QScrollArea, QCheckBox, QToolButton, QMenu,
 )
 
 from .data import BagDataSource
 from .playback import PlaybackController, format_time
+from .theme import apply_light_theme
 
 
 class LoadThread(QThread):
@@ -41,7 +43,7 @@ class VideoLabel(QLabel):
         super().__init__("Open a ROS2 MCAP bag directory")
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setMinimumSize(160, 120)
-        self.setStyleSheet("background: #15191f; color: #d5dbe5;")
+        self.setStyleSheet("background: #e9edf2; color: #344256;")
         self.original = None
 
     def show_rgb(self, rgb):
@@ -70,22 +72,26 @@ class SeriesPlot(pg.PlotWidget):
 
     def __init__(self, spec):
         super().__init__()
-        self.setMinimumHeight(130)
-        self.setTitle(spec.name)
+        self.setBackground("#ffffff")
+        self.setMinimumHeight(185)
+        for name in ("left", "bottom"):
+            self.getAxis(name).setPen(pg.mkPen("#9aa7b5"))
+            self.getAxis(name).setTextPen(pg.mkPen("#344256"))
         self.setLabel("bottom", "Time [s]")
         ylabel = {"Gyroscope": "Angular velocity", "Accelerometer": "Acceleration"}.get(spec.name, spec.name)
         self.setLabel("left", f"{ylabel} [{spec.units}]")
         self.showGrid(x=True, y=True, alpha=0.2)
-        self.addLegend()
-        colors = ("#ef6b73", "#70d89d", "#6cb8ff", "#e8c46b")
+        self.colors = ("#c03639", "#167344", "#2067b2", "#9550a2", "#a66300", "#007e87")
         self.curves = []
         for i, label in enumerate(spec.labels):
-            curve = self.plot(pen=pg.mkPen(colors[i % len(colors)], width=1), name=label)
+            curve = self.plot(pen=pg.mkPen(self.colors[i % len(self.colors)], width=1.3),
+                              name=label, connect="finite")
             curve.setClipToView(True)
             curve.setDownsampling(auto=True, method="peak")
             self.curves.append(curve)
         self.cursor = pg.InfiniteLine(pos=0, angle=90, movable=True,
-                                      pen=pg.mkPen("#f5e378", width=2))
+                                      pen=pg.mkPen("#596579", width=2),
+                                      hoverPen=pg.mkPen("#d46a00", width=2))
         self.addItem(self.cursor)
         self.cursor.sigDragged.connect(lambda _: self.seek_requested.emit(float(self.cursor.value())))
         self.scene().sigMouseClicked.connect(self._clicked)
@@ -106,6 +112,7 @@ class SeriesPlot(pg.PlotWidget):
 class MainWindow(QMainWindow):
     def __init__(self, config, bag_path=None):
         super().__init__()
+        apply_light_theme()
         self.config = config
         self.source = None
         self.loader = None
@@ -113,7 +120,7 @@ class MainWindow(QMainWindow):
         self.last_frame = None
         self.slider_scale = 1000.0
         self.setWindowTitle("ROS2 MCAP Viewer")
-        self.resize(1100, 900)
+        self.resize(1200, 950)
         self.controller = PlaybackController(self)
         body = QWidget()
         layout = QVBoxLayout(body)
@@ -133,13 +140,30 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Vertical)
         self.video = VideoLabel()
         splitter.addWidget(self.video)
-        self.plots = [SeriesPlot(spec) for spec in config.series]
-        for plot in self.plots:
-            splitter.addWidget(plot)
-            plot.seek_requested.connect(self.seek)
-            if plot is not self.plots[0]:
-                plot.setXLink(self.plots[0])
-        splitter.setSizes([420] + [200] * len(self.plots))
+        graph_area = QWidget()
+        graph_layout = QVBoxLayout(graph_area)
+        graph_layout.setContentsMargins(0, 0, 0, 0)
+        graph_toolbar = QHBoxLayout()
+        graph_toolbar.addWidget(QLabel("Graphs · shared time axis"))
+        graph_toolbar.addStretch()
+        self.video_toggle = QCheckBox("Show camera")
+        self.video_toggle.setChecked(True)
+        self.video_toggle.toggled.connect(self.video.setVisible)
+        graph_toolbar.addWidget(self.video_toggle)
+        self.graph_selector = QToolButton()
+        self.graph_selector.setText("Visible graphs ▾")
+        self.graph_selector.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.graph_menu = QMenu(self)
+        self.graph_selector.setMenu(self.graph_menu)
+        graph_toolbar.addWidget(self.graph_selector)
+        graph_layout.addLayout(graph_toolbar)
+        self.graph_tabs = QTabWidget()
+        graph_layout.addWidget(self.graph_tabs)
+        splitter.addWidget(graph_area)
+        self._syncing_ranges = False
+        self._build_graphs(config.series)
+        self.graph_tabs.currentChanged.connect(self._arrange_graphs)
+        splitter.setSizes([280, 580])
         layout.addWidget(splitter, 1)
         self.controls = QWidget()
         controls = QHBoxLayout(self.controls)
@@ -183,6 +207,95 @@ class MainWindow(QMainWindow):
         if bag_path:
             QTimer.singleShot(0, lambda: self.open_bag(bag_path))
 
+    def _build_graphs(self, specs):
+        # Rebuild from loaded series so optional motor topics need no manual setup.
+        self._building_graphs = True
+        while self.graph_tabs.count():
+            page = self.graph_tabs.widget(0)
+            self.graph_tabs.removeTab(0)
+            page.deleteLater()
+        self.graph_menu.clear()
+        self.plots = []
+        self.graph_cards = []
+        self.legend_checks = []
+        self.graph_actions = []
+        self.card_columns = []
+        groups = {}
+        for spec in specs:
+            if spec.group not in groups:
+                scroll = QScrollArea()
+                scroll.setWidgetResizable(True)
+                scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+                page = QWidget()
+                column = QVBoxLayout(page)
+                column.setAlignment(Qt.AlignmentFlag.AlignTop)
+                scroll.setWidget(page)
+                self.graph_tabs.addTab(scroll, spec.group)
+                groups[spec.group] = column
+            plot = SeriesPlot(spec)
+            plot.seek_requested.connect(self.seek)
+            plot.getViewBox().sigXRangeChanged.connect(self._sync_plot_ranges)
+            card = QWidget()
+            card.setMinimumHeight(235)
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(4, 4, 4, 4)
+            title = QLabel(spec.name)
+            title.setTextFormat(Qt.TextFormat.PlainText)
+            title.setStyleSheet("font-weight: 600; color: #202b38;")
+            card_layout.addWidget(title)
+            legend = QHBoxLayout()
+            checks = []
+            for i, (label, curve) in enumerate(zip(spec.labels, plot.curves)):
+                check = QCheckBox(label)
+                check.setChecked(True)
+                color = plot.colors[i % len(plot.colors)]
+                check.setStyleSheet(f"QCheckBox {{ color: {color}; font-size: 11px; }}")
+                check.toggled.connect(curve.setVisible)
+                legend.addWidget(check)
+                checks.append(check)
+            legend.addStretch()
+            card_layout.addLayout(legend)
+            card_layout.addWidget(plot, 1)
+            groups[spec.group].addWidget(card)
+            action = self.graph_menu.addAction(f"{spec.group} / {spec.name}")
+            action.setCheckable(True)
+            action.setChecked(True)
+            action.toggled.connect(card.setVisible)
+            self.graph_actions.append(action)
+            self.legend_checks.append(checks)
+            self.graph_cards.append(card)
+            self.card_columns.append(groups[spec.group])
+            self.plots.append(plot)
+        compare = QScrollArea()
+        compare.setWidgetResizable(True)
+        compare.setFrameShape(QScrollArea.Shape.NoFrame)
+        page = QWidget()
+        self.compare_column = QVBoxLayout(page)
+        self.compare_column.setAlignment(Qt.AlignmentFlag.AlignTop)
+        compare.setWidget(page)
+        self.compare_index = self.graph_tabs.addTab(compare, "All / Compare")
+        self._building_graphs = False
+
+    def _arrange_graphs(self, index):
+        if self._building_graphs:
+            return
+        for card, column, action in zip(self.graph_cards, self.card_columns, self.graph_actions):
+            target = self.compare_column if index == self.compare_index else column
+            target.addWidget(card)
+            card.setVisible(action.isChecked())
+
+    def _sync_plot_ranges(self, source_view, time_range):
+        # Explicit linking also works when the source/target tab is hidden.
+        if self._syncing_ranges:
+            return
+        self._syncing_ranges = True
+        try:
+            for plot in self.plots:
+                if plot.getViewBox() is not source_view:
+                    plot.setXRange(*time_range, padding=0)
+        finally:
+            self._syncing_ranges = False
+
     def _enable_transport(self, enabled):
         self.controls.setEnabled(enabled)
         self.slider.setEnabled(enabled)
@@ -224,6 +337,7 @@ class MainWindow(QMainWindow):
         if self.source:
             self.source.close()
         self.source = source
+        self._build_graphs([s.spec for s in source.series])
         self.path_label.setText(self.loader.path)
         self.path_label.setToolTip("\n".join(f"{k}: {v}" for k, v in source.topics.items()))
         self.last_frame = None

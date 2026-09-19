@@ -7,11 +7,13 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 import tempfile
+import re
+import json
 from typing import Callable
 
 import numpy as np
 
-from .config import SeriesSpec, ViewerConfig
+from .config import SeriesSpec, ViewerConfig, motor_series
 
 
 def sensor_timestamp(msg, record_ns: int, mode: str) -> tuple[int, bool]:
@@ -25,8 +27,36 @@ def sensor_timestamp(msg, record_ns: int, mode: str) -> tuple[int, bool]:
 
 def field_value(msg, path: str) -> float:
     for part in path.split("."):
-        msg = getattr(msg, part)
+        match = re.fullmatch(r"([A-Za-z_]\w*)((?:\[\d+\])*)", part)
+        if not match:
+            raise ValueError(f"Invalid numeric field path: {path}")
+        if isinstance(msg, dict):
+            if match[1] not in msg:
+                return float("nan")
+            msg = msg[match[1]]
+        else:
+            msg = getattr(msg, match[1])
+        for index in re.findall(r"\[(\d+)\]", match[2]):
+            # A missing array entry is a gap, not a zero-valued wheel sample.
+            if int(index) >= len(msg):
+                return float("nan")
+            msg = msg[int(index)]
     return float(msg)
+
+
+def series_values(payload, spec):
+    values = []
+    for i, (path, scale) in enumerate(zip(spec.fields, spec.scales or (1.0,) * len(spec.fields))):
+        try:
+            if spec.validity_fields and field_value(payload, spec.validity_fields[i]) != 1:
+                values.append(float("nan"))
+                continue
+            values.append(field_value(payload, path) * scale)
+        except (TypeError, ValueError, AttributeError):
+            if spec.payload != "json":
+                raise
+            values.append(float("nan"))
+    return tuple(values)
 
 
 @dataclass
@@ -110,8 +140,12 @@ class BagDataSource:
         reader.open(rosbag2_py.StorageOptions(uri=str(bag_path), storage_id="mcap"),
                     rosbag2_py.ConverterOptions("cdr", "cdr"))
         self.topics = {t.name: t.type for t in reader.get_all_topics_and_types()}
+        specs = list(self.config.series)
+        if self.config.motor_topic in self.topics:
+            names = {s.name for s in specs}
+            specs.extend(s for s in motor_series(self.config.motor_topic) if s.name not in names)
         expected = {self.config.image_topic: "sensor_msgs/msg/Image"}
-        for spec in self.config.series:
+        for spec in specs:
             if spec.topic in expected and expected[spec.topic] != spec.message_type:
                 raise ValueError(f"Conflicting types for {spec.topic}")
             expected[spec.topic] = spec.message_type
@@ -124,8 +158,9 @@ class BagDataSource:
         reader.set_filter(rosbag2_py.StorageFilter(topics=list(expected)))
         spool = tempfile.TemporaryFile(dir=self.config.temp_dir)
         image_rows = []
-        rows = [[] for _ in self.config.series]
-        count = fallback_count = 0
+        rows = [[] for _ in specs]
+        json_topics = {s.topic for s in specs if s.payload == "json"}
+        count = fallback_count = malformed_count = 0
         try:
             while reader.has_next():
                 if cancelled():
@@ -138,10 +173,19 @@ class BagDataSource:
                     offset = spool.tell()
                     spool.write(raw)
                     image_rows.append((stamp_ns, record_ns, offset, len(raw)))
-                for spec, samples in zip(self.config.series, rows):
+                payload = None
+                if topic in json_topics:
+                    try:
+                        payload = json.loads(msg.data)
+                        if not isinstance(payload, dict):
+                            raise ValueError("Expected JSON object")
+                    except (ValueError, TypeError):
+                        payload = {}
+                        malformed_count += 1
+                for spec, samples in zip(specs, rows):
                     if topic == spec.topic:
                         samples.append((stamp_ns, record_ns,
-                                        tuple(field_value(msg, p) for p in spec.fields)))
+                                        series_values(payload if spec.payload == "json" else msg, spec)))
                 count += 1
                 if count % 500 == 0:
                     progress(f"Scanning: {count:,} messages / image cache {spool.tell()/2**20:.1f} MiB")
@@ -153,7 +197,7 @@ class BagDataSource:
             image_rows.sort(key=lambda r: r[0])  # stable for duplicate sensor timestamps
             index = np.asarray(image_rows, dtype=np.int64)
             times = (index[:, 0] - self.origin_ns).astype(np.float64) * 1e-9
-            for spec, samples in zip(self.config.series, rows):
+            for spec, samples in zip(specs, rows):
                 samples.sort(key=lambda r: r[0])
                 if not samples:
                     self.warnings.append(f"No samples: {spec.topic}")
@@ -166,6 +210,8 @@ class BagDataSource:
                                 [float(s.time[-1]) for s in self.series if len(s.time)])
             if fallback_count:
                 self.warnings.append(f"{fallback_count:,} messages used record timestamps (missing/zero header)")
+            if malformed_count:
+                self.warnings.append(f"{malformed_count:,} invalid JSON messages shown as gaps")
             spool.flush()
             self.images = ImageSource(spool, times, index[:, 1], index[:, 2], index[:, 3],
                                       self._decoder(types[self.config.image_topic]), self.config.cache_bytes)
