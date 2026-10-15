@@ -23,6 +23,8 @@ def main():
     parser.add_argument("--motor-topic", default="/motor_bridge_node/status",
                         help="Optional JSON motor telemetry topic (auto-enabled when present)")
     parser.add_argument("--no-motor", action="store_true", help="Disable motor telemetry graphs")
+    parser.add_argument("--pose-topic", default="/camera/pose/sample", help="Optional pose topic")
+    parser.add_argument("--no-pose", action="store_true", help="Disable pose graphs")
     args = parser.parse_args()
     if args.cache_mib < 0:
         parser.error("--cache-mib must be nonnegative")
@@ -30,7 +32,8 @@ def main():
     config = ViewerConfig(args.image_topic,
                           (replace(gyro, topic=args.gyro_topic), replace(accel, topic=args.accel_topic)),
                           args.timestamp, args.cache_mib * 1024**2, args.temp_dir,
-                          None if args.no_motor else args.motor_topic)
+                          None if args.no_motor else args.motor_topic,
+                          None if args.no_pose else args.pose_topic)
     from PySide6.QtWidgets import QApplication
     from rosbag_viewer.window import MainWindow
     app = QApplication(sys.argv[:1])

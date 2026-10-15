@@ -34,9 +34,37 @@ uv add 'numpy>=1.26.4,<2' 'opencv-python>=4.11,<4.12' pyside6 pyqtgraph
 - **IMU**: gyro / accel
 - **Wheels**: 네 바퀴 RPM / 전류[A]
 - **Motor**: 네 바퀴 제어 출력[raw] / 드라이버 A·B 전압[V]
+- **Pose**: 위치 X/Y/Z[m] / 자세 roll·pitch·yaw[rad] (토픽이 있는 경우)
 - **All / Compare**: 모든 센서 그래프를 한 화면에서 스크롤하며 비교
+- **Custom Compare**: 데이터 계열을 선택해 한 좌표평면에 겹치거나 두 좌표평면에 나누어 표시
 
 `Visible graphs` 메뉴에서 필요한 그래프만 남길 수 있습니다. 예를 들어 All / Compare에서 gyro와 Wheel RPM만 선택하면 함께 비교할 수 있습니다. `Show camera`를 끄면 그래프 공간을 넓힐 수 있습니다. 모든 탭의 시간축 확대·이동 및 현재 시각은 동기화됩니다. 그래프가 많아도 영상과 하단 재생 컨트롤은 스크롤되지 않습니다. bag을 다시 열면 그래프 선택은 초기화됩니다.
+
+### 원하는 데이터를 같은 좌표평면에 그리기
+
+1. **Custom Compare** 탭을 엽니다.
+2. 상단에서 **1 plot / 2 plots**를 선택합니다.
+3. 왼쪽 목록에서 원하는 데이터의 **1 / 2 열 체크박스**를 켭니다. 예를 들어 `Pose orientation / yaw`와 `Gyroscope / z`를 1열에, 앞왼쪽·앞오른쪽 RPM을 2열에 선택합니다. 같은 데이터를 두 평면에 동시에 선택해도 됩니다.
+4. 각 평면에서 **Original values** 또는 **Normalize each series 0–1**을 선택합니다.
+
+X축은 공통 시간[s]이며, Y축에 선택한 데이터를 겹쳐 표시합니다. 센서마다 원래 timestamp 배열을 그대로 사용하므로 서로 다른 샘플링 속도를 강제로 보간하지 않습니다. 좌표평면별로 하나의 Y축을 공유하며, 원래 단위가 섞이면 `Mixed units · see legend`로 표시합니다. 별도의 오른쪽 Y축은 사용하지 않습니다. 크기가 매우 다른 값을 비교할 때는 평면을 나누거나 정규화를 사용하세요.
+
+정규화는 **각 데이터 계열의 전체 로그 구간**에서 최솟값을 0, 최댓값을 1로 변환합니다. 확대 구간이 바뀌어도 기준은 유지됩니다. 상수 계열은 0, 결측·유효하지 않은 샘플은 빈 구간으로 표시합니다. 저장된 원본 값과 기본 탭 그래프는 바뀌지 않습니다. 범례는 평면 위에 표시하며 계열명과 원래 단위를 함께 보여줍니다.
+
+검색은 목록만 필터링하고 이미 그린 선을 해제하지 않습니다. `Clear selections`로 두 평면의 선택을 모두 초기화합니다. 2→1→2 평면 전환에서는 두 번째 평면의 선택이 유지됩니다. bag을 새로 열면 선택이 초기화됩니다. 이 탭의 선택은 기존 `Visible graphs` 메뉴와 독립적입니다. cursor 탐색·재생·X축 확대 범위는 기존 그래프와 모두 동기화됩니다.
+
+### Pose 자동 인식
+
+기본 `/camera/pose/sample`이 있으면 **Pose position**과 **Pose orientation** 그래프를 추가합니다. 지원 타입은 `nav_msgs/msg/Odometry`, `geometry_msgs/msg/PoseStamped`, `geometry_msgs/msg/PoseWithCovarianceStamped`입니다. 기존 bag에 pose가 없으면 해당 탭 없이 정상 동작합니다.
+
+```bash
+uv run python -m rosbag_viewer rosbag_data/rosbag_2026-09-17_2/
+# 다른 pose 토픽을 지정하거나 읽지 않기
+uv run python -m rosbag_viewer /path/to/bag --pose-topic /odom
+uv run python -m rosbag_viewer /path/to/bag --no-pose
+```
+
+위치는 메시지의 원래 기준 좌표계에서 X/Y/Z[m]를 표시합니다. TF 변환이나 시작 위치 제거는 하지 않습니다. 기록된 quaternion(x,y,z,w)을 정규화해 고정 X/Y/Z축 roll/pitch/yaw[rad]로 변환합니다. ROS 좌표 관례는 [REP 103](https://reps.openrobotics.org/rep-0103/)을 따릅니다. 각도는 principal range로 표시하므로 roll/yaw의 ±π 경계에서 점프가 있을 수 있으며 unwrap하지 않습니다. pitch ±π/2에서는 Euler 표현이 유일하지 않아 roll=0인 동등한 표현을 사용합니다. 영벡터 또는 유한하지 않은 quaternion은 빈 구간입니다. timestamp는 다른 센서와 동일한 header 우선/record 대체 규칙을 사용합니다.
 
 ### 휠 데이터 자동 인식
 
@@ -124,8 +152,11 @@ Qt timer는 약 60 Hz로 UI를 갱신하고, 재생 위치는 monotonic clock의
 | `playback.py` | monotonic clock 재생, 공통 seek, 프레임 이동, 시간 포맷 |
 | `window.py` | 비동기 로딩, 영상, 그룹 탭·비교 화면, 외부 범례, 컨트롤, 이벤트 동기화 |
 | `theme.py` | 밝은 Qt 팔레트 |
+| `plots.py` | 공유 시간축 그래프, 밝은 축 스타일, seek cursor |
+| `comparison.py` | 채널별 1·2 평면 선택, 외부 범례, 정규화와 겹쳐 그리기 |
 | `main.py`, `__main__.py` | CLI 및 앱 진입점 |
 | `tests/test_viewer.py` | ROS 없이 수행하는 코어 및 offscreen GUI 회귀 테스트 |
+| `tests/test_comparison.py` | quaternion/RPY 변환, 사용자 비교 평면 선택·정규화·동기화 |
 | `tests/test_ros_integration.py` | 실제 ROS 직렬화/MCAP 생성·로드·디코딩 통합 테스트 |
 
 RPM, 모터 전류, cmd_vel 등은 `ViewerConfig.series`에 `SeriesSpec`을 추가하면 로더와 GUI가 해당 필드와 그래프를 자동으로 추가합니다. 예를 들어 `geometry_msgs/msg/Twist`의 선속도/각속도는 아래처럼 별도 그래프로 등록합니다.
@@ -158,3 +189,5 @@ API 참고: [rosbag2 SequentialReader 테스트](https://github.com/ros2/rosbag2
 이 작업 환경에서 ROS Jazzy를 source한 상태로 6개 테스트를 통과했습니다. 기존 `/home/cu/rosbag_2026-09-12_2` (3.5GB)를 offscreen GUI로 열어 영상 2,689개, gyro 17,923개, accel 5,553개, 상대시간 약 89.681초를 확인했습니다. 로딩 약 11.7초, 임의 여섯 위치 탐색 총 약 0.036초, 프로세스 최대 RSS 약 240MiB였습니다. 이는 해당 환경의 관측값이며 일반 성능 보장은 아닙니다. 실제 데스크톱에서 마우스로 조작하는 수동 검증은 별도로 필요합니다.
 
 2026-09-17 확장 검증: `rosbag_data/rosbag_2026-09-17_2/`를 offscreen GUI에서 열어 영상 6,990개 및 motor 상태 23,301개를 확인했습니다. 4개 모터 그래프의 실제 값 범위는 RPM -173~229, 전류 0~5.7A, 제어 출력 -2421~2971, 전압 25.9~26.8V였습니다. 단위 변환·유효성 처리·잘못된 JSON·토픽 자동 인식/비활성화·탭 이동·비교 화면·선/그래프 숨김·탭 사이 시간축 동기화 테스트를 추가했습니다.
+
+2026-09-19 확장 검증: 동일한 bag의 pose 46,596개를 로드해 위치·RPY 배열과 8개 기본 그래프를 확인했습니다. offscreen GUI에서 pose yaw/gyro z 오버레이 및 두 바퀴 RPM 비교를 서로 다른 평면에 배치하고 공통 시간축을 검증했습니다. 전체 14개 테스트에는 pose 자동 인식·비활성화, quaternion 정규화·잘못된 값·특이 자세, 독립 평면 선택과 정규화, 원본 timestamp 보존, custom cursor seek 및 X축 동기화가 포함됩니다.

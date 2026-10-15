@@ -98,7 +98,7 @@ def plot_accel_and_gyro():
     plt.show()
 
 
-motor_data_df = pd.read_parquet("rosbag_data/motor_data.parquet")
+motor_data_df = pd.read_parquet("rosbag_data/motor_data_09-17.parquet")
 
 motor_data = []
 
@@ -117,82 +117,175 @@ for index, row in motor_data_df.iterrows():
             "rf_state": msg.get("wheels", {}).get("rf", {}).get("status", None),
             "lr_state": msg.get("wheels", {}).get("lr", {}).get("status", None),
             "rr_state": msg.get("wheels", {}).get("rr", {}).get("status", None),
+            "lf_rpm": msg.get("wheels", {}).get("lf", {}).get("rpm", None),
+            "rf_rpm": msg.get("wheels", {}).get("rf", {}).get("rpm", None),
+            "lr_rpm": msg.get("wheels", {}).get("lr", {}).get("rpm", None),
+            "rr_rpm": msg.get("wheels", {}).get("rr", {}).get("rpm", None),
+            "lf_current_deci_amp": msg.get("wheels", {})
+            .get("lf", {})
+            .get("current_deci_amp", None),
+            "rf_current_deci_amp": msg.get("wheels", {})
+            .get("rf", {})
+            .get("current_deci_amp", None),
+            "lr_current_deci_amp": msg.get("wheels", {})
+            .get("lr", {})
+            .get("current_deci_amp", None),
+            "rr_current_deci_amp": msg.get("wheels", {})
+            .get("rr", {})
+            .get("current_deci_amp", None),
         }
     )
 
 t0 = motor_data[0]["timestamp"]
 t = [motor["timestamp"] - t0 for motor in motor_data]
 seq = [motor["seq"] for motor in motor_data]
-seq_diff = [seq[i] - seq[i - 1] if seq[i] != 0 else 256 - seq[i - 1] for i in range(1, len(seq))]
+seq_diff = [
+    seq[i] - seq[i - 1] if seq[i] != 0 else 256 - seq[i - 1] for i in range(1, len(seq))
+]
 
+# Draw rpm graphs for each wheel
 plt.figure(figsize=(12, 6))
-plt.subplot(3, 1, 1)
-plt.plot(t, [motor["state"] for motor in motor_data], label="Motor State", color="b")
-plt.title("State Over Time")
+plt.subplot(2, 2, 1)
+plt.plot(t, [motor["lf_rpm"] for motor in motor_data], label="LF RPM", color="b")
+plt.title("Left Front Wheel RPM Over Time")
 plt.xlabel("Time (s)")
-plt.ylabel("State")
+plt.ylabel("RPM")
 plt.legend()
 plt.grid()
 
-plt.subplot(3, 1, 2)
-plt.plot(t, [motor["system_error"] for motor in motor_data], label="Motor System Error", color="r")
-plt.title("System Error Over Time")
+plt.subplot(2, 2, 2)
+plt.plot(t, [motor["rf_rpm"] for motor in motor_data], label="RF RPM", color="r")
+plt.title("Right Front Wheel RPM Over Time")
 plt.xlabel("Time (s)")
-plt.ylabel("System Error")
+plt.ylabel("RPM")
 plt.legend()
 plt.grid()
 
-plt.subplot(3, 1, 3)
-plt.plot(t, [motor["validity"] for motor in motor_data], label="Motor Validity", color="g")
-plt.title("Validity Over Time")
+plt.subplot(2, 2, 3)
+plt.plot(t, [motor["lr_rpm"] for motor in motor_data], label="LR RPM", color="g")
+plt.title("Left Rear Wheel RPM Over Time")
 plt.xlabel("Time (s)")
-plt.ylabel("Validity")
+plt.ylabel("RPM")
 plt.legend()
 plt.grid()
 
-plt.tight_layout()
+plt.subplot(2, 2, 4)
+plt.plot(t, [motor["rr_rpm"] for motor in motor_data], label="RR RPM", color="m")
+plt.title("Right Rear Wheel RPM Over Time")
+plt.xlabel("Time (s)")
+plt.ylabel("RPM")
+plt.legend()
+plt.grid()
 
+# Draw current graphs for each wheel
 plt.figure(figsize=(12, 6))
-plt.subplot(4, 1, 1)
-plt.plot(t, [motor["lf_state"] for motor in motor_data], label="LF State", color="b")
-plt.title("Left Front Wheel State Over Time")
+plt.subplot(2, 2, 1)
+plt.plot(t, [motor["lf_current_deci_amp"] for motor in motor_data], label="LF Current", color="b")
+plt.title("Left Front Wheel Current Over Time")
 plt.xlabel("Time (s)")
-plt.ylabel("LF State")
+plt.ylabel("Current (deci-amp)")
 plt.legend()
 plt.grid()
 
-plt.subplot(4, 1, 2)
-plt.plot(t, [motor["rf_state"] for motor in motor_data], label="RF State", color="r")
-plt.title("Right Front Wheel State Over Time")
+plt.subplot(2, 2, 2)
+plt.plot(t, [motor["rf_current_deci_amp"] for motor in motor_data], label="RF Current", color="r")
+plt.title("Right Front Wheel Current Over Time")
 plt.xlabel("Time (s)")
-plt.ylabel("RF State")
+plt.ylabel("Current (deci-amp)")
 plt.legend()
 plt.grid()
 
-plt.subplot(4, 1, 3)
-plt.plot(t, [motor["lr_state"] for motor in motor_data], label="LR State", color="g")
-plt.title("Left Rear Wheel State Over Time")
+plt.subplot(2, 2, 3)
+plt.plot(t, [motor["lr_current_deci_amp"] for motor in motor_data], label="LR Current", color="g")
+plt.title("Left Rear Wheel Current Over Time")
 plt.xlabel("Time (s)")
-plt.ylabel("LR State")
+plt.ylabel("Current (deci-amp)")
 plt.legend()
 plt.grid()
 
-plt.subplot(4, 1, 4)
-plt.plot(t, [motor["rr_state"] for motor in motor_data], label="RR State", color="m")
-plt.title("Right Rear Wheel State Over Time")
+plt.subplot(2, 2, 4)
+plt.plot(t, [motor["rr_current_deci_amp"] for motor in motor_data], label="RR Current", color="m")
+plt.title("Right Rear Wheel Current Over Time")
 plt.xlabel("Time (s)")
-plt.ylabel("RR State")
+plt.ylabel("Current (deci-amp)")
 plt.legend()
 plt.grid()
 
-plt.tight_layout()
+# plt.figure(figsize=(12, 6))
+# plt.subplot(3, 1, 1)
+# plt.plot(t, [motor["state"] for motor in motor_data], label="Motor State", color="b")
+# plt.title("State Over Time")
+# plt.xlabel("Time (s)")
+# plt.ylabel("State")
+# plt.legend()
+# plt.grid()
 
-plt.figure(figsize=(12, 6))
-plt.plot(t[1:], seq_diff, label="Sequence Number Difference", color="c")
-plt.title("Sequence Number Difference Over Time")
-plt.xlabel("Time (s)")
-plt.ylabel("Sequence Number Difference")
-plt.legend()
-plt.grid()
+# plt.subplot(3, 1, 2)
+# plt.plot(
+#     t,
+#     [motor["system_error"] for motor in motor_data],
+#     label="Motor System Error",
+#     color="r",
+# )
+# plt.title("System Error Over Time")
+# plt.xlabel("Time (s)")
+# plt.ylabel("System Error")
+# plt.legend()
+# plt.grid()
+
+# plt.subplot(3, 1, 3)
+# plt.plot(
+#     t, [motor["validity"] for motor in motor_data], label="Motor Validity", color="g"
+# )
+# plt.title("Validity Over Time")
+# plt.xlabel("Time (s)")
+# plt.ylabel("Validity")
+# plt.legend()
+# plt.grid()
+
+# plt.tight_layout()
+
+# plt.figure(figsize=(12, 6))
+# plt.subplot(4, 1, 1)
+# plt.plot(t, [motor["lf_state"] for motor in motor_data], label="LF State", color="b")
+# plt.title("Left Front Wheel State Over Time")
+# plt.xlabel("Time (s)")
+# plt.ylabel("LF State")
+# plt.legend()
+# plt.grid()
+
+# plt.subplot(4, 1, 2)
+# plt.plot(t, [motor["rf_state"] for motor in motor_data], label="RF State", color="r")
+# plt.title("Right Front Wheel State Over Time")
+# plt.xlabel("Time (s)")
+# plt.ylabel("RF State")
+# plt.legend()
+# plt.grid()
+
+# plt.subplot(4, 1, 3)
+# plt.plot(t, [motor["lr_state"] for motor in motor_data], label="LR State", color="g")
+# plt.title("Left Rear Wheel State Over Time")
+# plt.xlabel("Time (s)")
+# plt.ylabel("LR State")
+# plt.legend()
+# plt.grid()
+
+# plt.subplot(4, 1, 4)
+# plt.plot(t, [motor["rr_state"] for motor in motor_data], label="RR State", color="m")
+# plt.title("Right Rear Wheel State Over Time")
+# plt.xlabel("Time (s)")
+# plt.ylabel("RR State")
+# plt.legend()
+# plt.grid()
+
+# plt.tight_layout()
+
+# plt.figure(figsize=(12, 6))
+# plt.plot(t[1:], seq_diff, label="Sequence Number Difference", color="c")
+# plt.title("Sequence Number Difference Over Time")
+# plt.xlabel("Time (s)")
+# plt.ylabel("Sequence Number Difference")
+# plt.legend()
+# plt.grid()
 
 plt.show()

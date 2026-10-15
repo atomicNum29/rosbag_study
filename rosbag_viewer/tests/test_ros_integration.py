@@ -17,6 +17,55 @@ ROS_AVAILABLE = all(importlib.util.find_spec(name) for name in
 
 @unittest.skipUnless(ROS_AVAILABLE, "Source ROS2 to run MCAP integration tests")
 class RosIntegrationTests(unittest.TestCase):
+    def test_pose_autodetection_relative_time_and_invalid_quaternion(self):
+        import rosbag2_py
+        from rclpy.serialization import serialize_message
+        from sensor_msgs.msg import Image
+        from nav_msgs.msg import Odometry
+        config = ViewerConfig(series=(), motor_topic=None)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "bag")
+            writer = rosbag2_py.SequentialWriter()
+            writer.open(rosbag2_py.StorageOptions(uri=path, storage_id="mcap"),
+                        rosbag2_py.ConverterOptions("cdr", "cdr"))
+            for i, (name, kind) in enumerate(((config.image_topic, "sensor_msgs/msg/Image"),
+                                               (config.pose_topic, "nav_msgs/msg/Odometry"))):
+                writer.create_topic(rosbag2_py.TopicMetadata(
+                    id=i, name=name, type=kind, serialization_format="cdr"))
+            image = Image()
+            image.header.stamp.sec = 100
+            writer.write(config.image_topic, serialize_message(image), 100_000_000_000)
+            for i in range(2):
+                msg = Odometry()
+                msg.header.stamp.sec = 101 + i
+                msg.pose.pose.position.x = 2.0 + i
+                if i == 0:
+                    msg.pose.pose.orientation.z = 2 ** -0.5
+                    msg.pose.pose.orientation.w = 2 ** -0.5
+                else:
+                    msg.pose.pose.orientation.w = 0.0
+                writer.write(config.pose_topic, serialize_message(msg), (101 + i) * 1_000_000_000 + 5)
+            del writer
+            source = BagDataSource(config)
+            try:
+                source.load(path)
+                self.assertEqual(len(source.series), 2)
+                position, orientation = source.series
+                np.testing.assert_allclose(position.time, [1, 2])
+                np.testing.assert_allclose(position.values[:, 0], [2, 3])
+                self.assertEqual(orientation.values.shape, (2, 3))
+                np.testing.assert_allclose(orientation.values[0], [0, 0, np.pi / 2], atol=1e-12)
+                self.assertTrue(np.isnan(orientation.values[1]).all())
+                self.assertEqual(source.duration, 2)
+            finally:
+                source.close()
+            disabled = BagDataSource(replace(config, pose_topic=None))
+            try:
+                disabled.load(path)
+                self.assertEqual(disabled.series, [])
+            finally:
+                disabled.close()
+
     def test_motor_json_autodetection_and_invalid_payload_gaps(self):
         import rosbag2_py
         from rclpy.serialization import serialize_message

@@ -9,11 +9,12 @@ from pathlib import Path
 import tempfile
 import re
 import json
+import math
 from typing import Callable
 
 import numpy as np
 
-from .config import SeriesSpec, ViewerConfig, motor_series
+from .config import SeriesSpec, ViewerConfig, motor_series, pose_series
 
 
 def sensor_timestamp(msg, record_ns: int, mode: str) -> tuple[int, bool]:
@@ -44,7 +45,28 @@ def field_value(msg, path: str) -> float:
     return float(msg)
 
 
+def quaternion_rpy(x, y, z, w):
+    """Normalized xyzw quaternion to fixed-axis XYZ RPY, in radians.
+
+    Angles use principal ranges (no unwrapping). At pitch +/- pi/2, choose
+    roll=0 and the equivalent yaw; Euler coordinates are not unique there.
+    """
+    norm = math.hypot(x, y, z, w)
+    if not math.isfinite(norm) or norm < 1e-12:
+        return (float("nan"),) * 3
+    x, y, z, w = (v / norm for v in (x, y, z, w))
+    sin_pitch = max(-1.0, min(1.0, 2 * (w * y - z * x)))
+    if abs(sin_pitch) >= 1 - 1e-12:
+        return (0.0, math.copysign(math.pi / 2, sin_pitch),
+                math.atan2(2 * (w * z - x * y), 1 - 2 * (x * x + z * z)))
+    return (math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y)),
+            math.asin(sin_pitch),
+            math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)))
+
+
 def series_values(payload, spec):
+    if spec.transform == "quaternion_rpy":
+        return quaternion_rpy(*(field_value(payload, path) for path in spec.fields))
     values = []
     for i, (path, scale) in enumerate(zip(spec.fields, spec.scales or (1.0,) * len(spec.fields))):
         try:
@@ -144,6 +166,10 @@ class BagDataSource:
         if self.config.motor_topic in self.topics:
             names = {s.name for s in specs}
             specs.extend(s for s in motor_series(self.config.motor_topic) if s.name not in names)
+        if self.config.pose_topic in self.topics:
+            names = {s.name for s in specs}
+            specs.extend(s for s in pose_series(self.config.pose_topic, self.topics[self.config.pose_topic])
+                         if s.name not in names)
         expected = {self.config.image_topic: "sensor_msgs/msg/Image"}
         for spec in specs:
             if spec.topic in expected and expected[spec.topic] != spec.message_type:
@@ -204,7 +230,7 @@ class BagDataSource:
                 stamps = np.asarray([r[0] for r in samples], dtype=np.int64)
                 self.series.append(TimeSeriesData(
                     spec, (stamps - self.origin_ns).astype(np.float64) * 1e-9,
-                    np.asarray([r[2] for r in samples], dtype=np.float64).reshape(-1, len(spec.fields)),
+                    np.asarray([r[2] for r in samples], dtype=np.float64).reshape(-1, len(spec.labels)),
                     np.asarray([r[1] for r in samples], dtype=np.int64)))
             self.duration = max([float(times[-1])] +
                                 [float(s.time[-1]) for s in self.series if len(s.time)])
