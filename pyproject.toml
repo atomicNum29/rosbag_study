@@ -1,5 +1,5 @@
 [project]
-name = "python-workspace"
+name = "rosbag_study"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
@@ -12,5 +12,6 @@ dependencies = [
     "pyarrow>=25.0.1",
     "pyqtgraph>=0.14.0",
     "pyside6>=6.11.2",
+    "pyvista>=0.49.1",
     "pyyaml>=6.0.3",
 ]
