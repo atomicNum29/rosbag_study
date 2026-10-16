@@ -27,6 +27,43 @@ uv run python rosbag_viewer/main.py /path/to/bag_directory
 uv add 'numpy>=1.26.4,<2' 'opencv-python>=4.11,<4.12' pyside6 pyqtgraph
 ```
 
+## 여러 카메라 · 라이다 · 속도 명령
+
+```bash
+uv run python -m rosbag_viewer rosbag_data/rosbag_2026-10-15_1/
+```
+
+상단 센서 영역은 카메라와 라이다를 함께 배치하는 **2D views**입니다. **Visible views**에서 카메라·라이다 토픽을 각각 선택하면 같은 영역에 동시에 표시합니다. 기본은 기준 카메라와 라이다이며, **Show all / Hide all**로 전체 선택·해제하고 **1~3 columns**로 열 수를 바꿀 수 있습니다. 뷰가 많으면 스크롤하거나 센서 영역 높이를 늘려 볼 수 있습니다. 하단 시간 슬라이더, 그래프 cursor, 재생·일시정지로 모든 센서를 같은 시각에 탐색합니다. 센서 영역과 그래프 사이의 경계선을 드래그해 높이를 조절할 수 있습니다.
+
+### 카메라
+
+bag의 모든 `sensor_msgs/msg/Image` / `sensor_msgs/msg/CompressedImage` 토픽을 자동으로 읽습니다. 새 bag의 `/front_camera/image_raw`, `/rear_camera/image_raw`, `/camera/fisheye1/image_raw`를 모두 볼 수 있습니다.
+
+- **Frame-step camera**: 이전/다음 프레임 이동의 기준을 선택합니다. 화면에 표시할 토픽은 `Visible views`에서 별도로 선택합니다. `--image-topic`은 처음 선택할 카메라이며, 다른 카메라의 로딩을 제한하지 않습니다. 지정 카메라가 없으면 사용 가능한 카메라를 선택하고 상태 표시줄에 알립니다.
+- **Visible views → Show all**: 모든 카메라와 라이다를 같은 그리드에 표시합니다. 동시 보기에서도 프레임 이동 기준은 선택한 카메라입니다.
+- 각 카메라는 현재 시각 이하의 가장 최근 프레임을 독립적으로 선택하므로 서로 다른 FPS를 지원합니다. 첫 프레임 이전에는 빈 화면입니다.
+- 영상 위의 `Frame`은 상대 센서 timestamp, `age`는 현재 시각과의 차이입니다. 마지막 영상 이후에는 마지막 프레임과 증가하는 age가 표시됩니다.
+
+### 라이다
+
+`/scan` (`sensor_msgs/msg/LaserScan`)이 있으면 `Visible views`에 **Lidar · /scan** 항목이 추가됩니다. 각 ray의 `angle_min + i × angle_increment`와 range를 이용해 센서 기준 `X=r cos(angle)`, `Y=r sin(angle)` 점을 그립니다. 화면의 **세로축은 X(전방 +X가 위쪽), 가로축은 Y(+Y가 왼쪽)**이며 원점은 빨간 십자입니다. NaN/Inf 및 `range_min`~`range_max` 밖의 값은 제외합니다.
+
+**Flip scan orientation (Y → −Y)**를 켜면 Y 부호를 반전하여 화면의 좌우를 뒤집습니다. +X가 위를 향하는 방향은 유지됩니다. Z 방향이 반대인 설치에서 표시 방향을 바꿔 비교할 수 있으며, 원본 스캔은 변경하지 않습니다. 이는 2D 표시 반전이며 임의 장착 각도의 TF 보정은 아닙니다. 반전 선택은 bag을 다시 열어도 현재 앱 실행 중에는 유지됩니다.
+
+센서 `frame_id`, 유효 ray 수, 스캔 시각과 age를 표시합니다. 스캔도 현재 시각 이하의 가장 최근 메시지를 선택하며, 첫 스캔 전에는 빈 화면입니다. 첫 스캔에서 범위를 맞춘 뒤 마우스로 확대·이동할 수 있습니다. XY축은 같은 축척을 사용합니다. `header.stamp`는 첫 ray 획득 시각이며, ray별 시간 보정·이동 왜곡 보정·TF 변환·지도 누적은 수행하지 않습니다. [LaserScan 메시지 정의](https://github.com/ros2/common_interfaces/blob/rolling/sensor_msgs/msg/LaserScan.msg)
+
+### 속도 명령
+
+`/cmd_vel`이 있으면 **Command** 탭에 선속도 X/Y/Z[m/s]와 각속도 X/Y/Z[rad/s]를 추가합니다. 이 계열은 **All / Compare**, **Custom Compare**에서도 선택할 수 있어 휠 RPM이나 IMU와 비교할 수 있습니다. `Twist`는 header가 없어 record timestamp를 사용하며 `TwistStamped`는 기존 timestamp 선택 규칙을 적용합니다.
+
+```bash
+uv run python -m rosbag_viewer /path/to/bag --scan-topic /lidar/scan --cmd-vel-topic /robot/cmd_vel
+# 해당 센서 읽기 제외
+uv run python -m rosbag_viewer /path/to/bag --no-scan --no-cmd-vel
+```
+
+카메라와 라이다는 각각 임시 디스크 파일과 시간 인덱스를 사용합니다. 영상 전체를 디코딩해 RAM에 올리지 않으며, 기본 64MiB 영상 캐시 예산을 카메라 수로 나눠 사용합니다. 라이다는 마지막으로 디코딩한 스캔 하나만 보관합니다. 표시용 Qt 이미지와 MCAP reader 버퍼는 별도 메모리를 사용합니다. 임시 디스크 공간은 모든 영상·스캔의 직렬화 바이트 크기만큼 필요합니다. bag 재열기 시 다시 생성하며 종료·로딩 취소·실패 시 정리합니다.
+
 ## 밝은 테마와 그래프 구성
 
 전체 UI는 운영체제의 다크 모드와 무관하게 밝은 테마를 사용하며, 그래프 배경은 흰색입니다. 범례는 그래프 위의 별도 줄에 표시되어 데이터를 가리지 않습니다. 범례 체크박스로 각 축/바퀴의 선을 개별적으로 켜고 끌 수 있습니다.
@@ -38,7 +75,7 @@ uv add 'numpy>=1.26.4,<2' 'opencv-python>=4.11,<4.12' pyside6 pyqtgraph
 - **All / Compare**: 모든 센서 그래프를 한 화면에서 스크롤하며 비교
 - **Custom Compare**: 데이터 계열을 선택해 한 좌표평면에 겹치거나 두 좌표평면에 나누어 표시
 
-`Visible graphs` 메뉴에서 필요한 그래프만 남길 수 있습니다. 예를 들어 All / Compare에서 gyro와 Wheel RPM만 선택하면 함께 비교할 수 있습니다. `Show camera`를 끄면 그래프 공간을 넓힐 수 있습니다. 모든 탭의 시간축 확대·이동 및 현재 시각은 동기화됩니다. 그래프가 많아도 영상과 하단 재생 컨트롤은 스크롤되지 않습니다. bag을 다시 열면 그래프 선택은 초기화됩니다.
+`Visible graphs` 메뉴에서 필요한 그래프만 남길 수 있습니다. 예를 들어 All / Compare에서 gyro와 Wheel RPM만 선택하면 함께 비교할 수 있습니다. `Show 2D views`를 끄면 그래프 공간을 넓힐 수 있습니다. 모든 탭의 시간축 확대·이동 및 현재 시각은 동기화됩니다. 그래프가 많아도 영상과 하단 재생 컨트롤은 스크롤되지 않습니다. bag을 다시 열면 그래프 선택은 초기화됩니다.
 
 ### 원하는 데이터를 같은 좌표평면에 그리기
 
@@ -111,7 +148,7 @@ uv run python -m rosbag_viewer /path/to/bag \
 ```
 
 - `header` 모드는 유효한 `header.stamp`를 사용합니다. 없거나 0이면 해당 메시지의 record timestamp로 대체하며 상태 표시줄에 대체 횟수를 표시합니다.
-- 공통 0초는 **선택된 영상 및 시계열 메시지의 최소 유효 timestamp**입니다. header 모드에서는 metadata의 record 시작 시각과 다를 수 있습니다. 표시 범위도 선택한 데이터의 끝까지입니다.
+- 공통 0초는 **읽어 들인 모든 카메라·라이다·시계열 메시지의 최소 유효 timestamp**입니다. header 모드에서는 metadata의 record 시작 시각과 다를 수 있습니다. 표시 범위도 선택한 데이터의 끝까지입니다.
 - epoch를 float로 변환한 뒤 빼지 않고, 정수 nanoseconds에서 시작 시각을 뺀 다음 상대 seconds로 변환합니다.
 - 이미지 및 시계열의 `record_ns`에 원래 record timestamp를 보존합니다. 원점은 `BagDataSource.origin_ns`입니다.
 - 서로 다른 센서 clock domain을 자동 보정하지 않습니다. header가 record 시간과 호환되지 않거나 센서마다 시간 기준이 다르면 `--timestamp record`로 전체 데이터를 동일한 record 기준에서 열 수 있습니다.
@@ -137,9 +174,9 @@ uv run python -m rosbag_viewer /path/to/bag \
 
 첫 로드 때 선택된 토픽을 한 번 순회합니다. IMU 등 수치 데이터는 NumPy 배열로 보관합니다. 영상은 header를 확인하기 위해 ROS 메시지로 역직렬화하지만, **모든 프레임을 영상 배열로 디코딩하여 RAM에 저장하지 않습니다.** 직렬화 바이트를 임시 파일에 기록하고 timestamp, record timestamp, offset, length만 메모리에 보관합니다.
 
-seek에서는 `np.searchsorted(..., side="right") - 1`로 프레임을 찾고, 파일 offset으로 직접 읽어 `cv_bridge`로 RGB 변환합니다. 읽은 프레임은 기본 최대 64 MiB LRU 캐시에 보관합니다. 단일 프레임이 예산보다 크면 표시만 하고 캐시에 넣지 않습니다. mono8, mono16, RGB/BGR 등 cv_bridge가 RGB8로 변환할 수 있는 Image encoding을 지원합니다. mono16은 고정 16→8bit 스케일로 표시합니다.
+seek에서는 `np.searchsorted(..., side="right") - 1`로 프레임을 찾고, 파일 offset으로 직접 읽어 `cv_bridge`로 RGB 변환합니다. 읽은 프레임은 전체 카메라 합계 기본 최대 64 MiB LRU 캐시에 보관합니다(예산을 카메라 수로 균등 분할). 단일 프레임이 예산보다 크면 표시만 하고 캐시에 넣지 않습니다. mono8, mono16, RGB/BGR 등 cv_bridge가 RGB8로 변환할 수 있는 Image encoding을 지원합니다. mono16은 고정 16→8bit 스케일로 표시합니다.
 
-이 버전은 **MCAP 자체의 chunk index를 seek에 사용하지 않는 디스크 인덱스 방식**입니다. 압축된 MCAP보다 큰 임시 공간이 필요할 수 있으며, 원시 직렬화 이미지 전체 크기만큼 디스크를 사용합니다. `--temp-dir`로 충분한 공간이 있는 디스크를 선택하세요. 파일은 닫기, 재열기, 로딩 실패/취소 시 정리합니다. 디스크 공간 부족은 로딩 오류로 표시됩니다. 최초 스캔은 전체 길이에 비례하며 재실행 시 다시 수행합니다.
+이 버전은 **MCAP 자체의 chunk index를 seek에 사용하지 않는 디스크 인덱스 방식**입니다. 압축된 MCAP보다 큰 임시 공간이 필요할 수 있으며, 원시 직렬화 이미지 및 스캔 전체 크기만큼 디스크를 사용합니다. `--temp-dir`로 충분한 공간이 있는 디스크를 선택하세요. 파일은 닫기, 재열기, 로딩 실패/취소 시 정리합니다. 디스크 공간 부족은 로딩 오류로 표시됩니다. 최초 스캔은 전체 길이에 비례하며 재실행 시 다시 수행합니다.
 
 Qt timer는 약 60 Hz로 UI를 갱신하고, 재생 위치는 monotonic clock의 경과 시간 × 재생속도로 계산합니다. 느린 갱신에서 프레임을 건너뛰어 시간 흐름을 유지합니다. 단일 프레임 읽기/디코딩은 GUI 스레드에서 실행하므로 매우 큰 프레임이나 느린 디스크에서는 잠깐 지연될 수 있습니다. cursor/slider의 프로그램 갱신은 `QSignalBlocker`로 감싸 피드백 루프를 방지합니다.
 
@@ -152,6 +189,7 @@ Qt timer는 약 60 Hz로 UI를 갱신하고, 재생 위치는 monotonic clock의
 | `playback.py` | monotonic clock 재생, 공통 seek, 프레임 이동, 시간 포맷 |
 | `window.py` | 비동기 로딩, 영상, 그룹 탭·비교 화면, 외부 범례, 컨트롤, 이벤트 동기화 |
 | `theme.py` | 밝은 Qt 팔레트 |
+| `media.py` | 여러 카메라 선택·동시 보기, LaserScan XY 표시·Y 반전 |
 | `plots.py` | 공유 시간축 그래프, 밝은 축 스타일, seek cursor |
 | `comparison.py` | 채널별 1·2 평면 선택, 외부 범례, 정규화와 겹쳐 그리기 |
 | `main.py`, `__main__.py` | CLI 및 앱 진입점 |
@@ -191,3 +229,5 @@ API 참고: [rosbag2 SequentialReader 테스트](https://github.com/ros2/rosbag2
 2026-09-17 확장 검증: `rosbag_data/rosbag_2026-09-17_2/`를 offscreen GUI에서 열어 영상 6,990개 및 motor 상태 23,301개를 확인했습니다. 4개 모터 그래프의 실제 값 범위는 RPM -173~229, 전류 0~5.7A, 제어 출력 -2421~2971, 전압 25.9~26.8V였습니다. 단위 변환·유효성 처리·잘못된 JSON·토픽 자동 인식/비활성화·탭 이동·비교 화면·선/그래프 숨김·탭 사이 시간축 동기화 테스트를 추가했습니다.
 
 2026-09-19 확장 검증: 동일한 bag의 pose 46,596개를 로드해 위치·RPY 배열과 8개 기본 그래프를 확인했습니다. offscreen GUI에서 pose yaw/gyro z 오버레이 및 두 바퀴 RPM 비교를 서로 다른 평면에 배치하고 공통 시간축을 검증했습니다. 전체 14개 테스트에는 pose 자동 인식·비활성화, quaternion 정규화·잘못된 값·특이 자세, 독립 평면 선택과 정규화, 원본 timestamp 보존, custom cursor seek 및 X축 동기화가 포함됩니다.
+
+2026-10-15 검증: `rosbag_data/rosbag_2026-10-15_1/`(약 25GB)를 offscreen GUI로 열어 전방 9,009개, 후방 8,986개, fisheye 13,410개 영상, LaserScan 5,474개, cmd_vel 6,307개를 확인했습니다. 해당 환경에서 로딩 약 108초, 최대 RSS 약 321MiB였습니다. 총 18개 테스트에는 raw/압축 영상 직접 읽기, 카메라 전환·동시 보기·프레임 이동, 스캔 범위 필터·시간 탐색·Y 반전, Twist/TwistStamped 시간·필드 매핑 및 임시 파일 정리가 포함됩니다.

@@ -14,6 +14,7 @@ from .playback import PlaybackController, format_time
 from .theme import apply_light_theme
 from .plots import SeriesPlot
 from .comparison import CustomCompare
+from .media import SpatialPanel
 
 
 class LoadThread(QThread):
@@ -37,35 +38,6 @@ class LoadThread(QThread):
         except Exception as exc:
             source.close()
             self.failed.emit(f"{type(exc).__name__}: {exc}")
-
-
-class VideoLabel(QLabel):
-    def __init__(self):
-        super().__init__("Open a ROS2 MCAP bag directory")
-        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setMinimumSize(160, 120)
-        self.setStyleSheet("background: #e9edf2; color: #344256;")
-        self.original = None
-
-    def show_rgb(self, rgb):
-        if rgb is None:
-            self.original = None
-            self.clear()
-            self.setText("No camera frame at this time")
-            return
-        h, w, _ = rgb.shape
-        image = QImage(rgb.data, w, h, rgb.strides[0], QImage.Format.Format_RGB888).copy()
-        self.original = QPixmap.fromImage(image)
-        self._rescale()
-
-    def _rescale(self):
-        if self.original is not None:
-            self.setPixmap(self.original.scaled(self.size(), Qt.AspectRatioMode.KeepAspectRatio,
-                                                Qt.TransformationMode.SmoothTransformation))
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._rescale()
 
 
 class MainWindow(QMainWindow):
@@ -97,17 +69,23 @@ class MainWindow(QMainWindow):
         top.addWidget(self.path_label, 1)
         layout.addLayout(top)
         splitter = QSplitter(Qt.Orientation.Vertical)
-        self.video = VideoLabel()
-        splitter.addWidget(self.video)
+        self.spatial_panel = SpatialPanel()
+        self.camera_panel = self.spatial_panel
+        self.video = self.spatial_panel.video
+        self.scan_view = self.spatial_panel.scan_view
+        self.spatial_panel.selection_changed.connect(self._camera_changed)
+        self.spatial_panel.view_changed.connect(lambda: self.update_position(self.controller.current_time))
+        splitter.addWidget(self.spatial_panel)
         graph_area = QWidget()
         graph_layout = QVBoxLayout(graph_area)
         graph_layout.setContentsMargins(0, 0, 0, 0)
         graph_toolbar = QHBoxLayout()
         graph_toolbar.addWidget(QLabel("Graphs · shared time axis"))
         graph_toolbar.addStretch()
-        self.video_toggle = QCheckBox("Show camera")
+        self.video_toggle = QCheckBox("Show 2D views")
         self.video_toggle.setChecked(True)
         self.video_toggle.toggled.connect(self.video.setVisible)
+        self.video_toggle.toggled.connect(self.spatial_panel.setVisible)
         graph_toolbar.addWidget(self.video_toggle)
         self.graph_selector = QToolButton()
         self.graph_selector.setText("Visible graphs ▾")
@@ -266,6 +244,7 @@ class MainWindow(QMainWindow):
             self._syncing_ranges = False
 
     def _enable_transport(self, enabled):
+        self.camera_panel.setEnabled(enabled)
         self.controls.setEnabled(enabled)
         self.slider.setEnabled(enabled)
         self.custom_compare.setEnabled(enabled)
@@ -311,6 +290,8 @@ class MainWindow(QMainWindow):
         self.path_label.setText(self.loader.path)
         self.path_label.setToolTip("\n".join(f"{k}: {v}" for k, v in source.topics.items()))
         self.last_frame = None
+        with QSignalBlocker(self.camera_panel):
+            self.spatial_panel.set_sources(source.cameras, source.images, source.scan, self.config.scan_topic)
         # QSlider uses signed 32-bit integers. Retain milliseconds for normal bags.
         self.slider_scale = min(1000.0, (2**31 - 2) / max(source.duration, 0.001))
         with QSignalBlocker(self.slider):
@@ -318,7 +299,7 @@ class MainWindow(QMainWindow):
         for plot, series in zip(self.plots, source.series):
             plot.set_series(series, source.duration)
         self.custom_compare.set_data(source.series, source.duration)
-        text = f"{len(source.images.timestamps):,} frames · {format_time(source.duration)}"
+        text = f"{sum(len(c.timestamps) for c in source.cameras.values()):,} frames / {len(source.cameras)} cameras · {format_time(source.duration)}"
         if source.warnings:
             text += " · " + "; ".join(source.warnings)
         self.statusBar().showMessage(text)
@@ -342,6 +323,12 @@ class MainWindow(QMainWindow):
         if loader.isInterruptionRequested():
             self.statusBar().showMessage("Loading cancelled")
 
+    def _camera_changed(self, topic):
+        if self.source is not None and topic in self.source.cameras:
+            self.controller.timestamps = self.source.cameras[topic].timestamps
+            self.last_frame = None
+            self.update_position(self.controller.current_time)
+
     def seek(self, time_s):
         if self.source is not None:
             self.controller.seek(time_s)
@@ -354,6 +341,14 @@ class MainWindow(QMainWindow):
             self.slider.setValue(round(time_s * self.slider_scale))
         self.time_label.setText(f"{format_time(time_s)} / {format_time(self.controller.duration)}")
         if self.source is None:
+            return
+        if getattr(self.source, "cameras", None):
+            try:
+                self.spatial_panel.update_time(time_s)
+                self.last_frame = self.source.cameras[self.camera_panel.selected_topic].index_at(time_s)
+            except Exception as exc:
+                self.controller.pause()
+                self.statusBar().showMessage(f"Media decoding failed: {exc}")
             return
         index = self.source.images.index_at(time_s)
         if index == self.last_frame:

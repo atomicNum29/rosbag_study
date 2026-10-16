@@ -38,6 +38,8 @@ class ViewerConfig:
     temp_dir: str | None = None
     motor_topic: str | None = "/motor_bridge_node/status"
     pose_topic: str | None = "/camera/pose/sample"
+    scan_topic: str | None = "/scan"
+    cmd_vel_topic: str | None = "/cmd_vel"
 
     def __post_init__(self):
         if self.timestamp_mode not in ("header", "record"):
@@ -103,3 +105,14 @@ def pose_series(topic: str, message_type: str) -> tuple[SeriesSpec, ...]:
                    tuple(f"{prefix}.orientation.{axis}" for axis in "xyzw"),
                    ("roll", "pitch", "yaw"), "rad", group="Pose", transform="quaternion_rpy"),
     )
+
+
+def command_series(topic: str, message_type: str) -> tuple[SeriesSpec, ...]:
+    if message_type not in ("geometry_msgs/msg/Twist", "geometry_msgs/msg/TwistStamped"):
+        raise ValueError(f"Unsupported velocity command type: {message_type}")
+    prefix = "twist." if message_type.endswith("TwistStamped") else ""
+    return tuple(SeriesSpec(name, topic, message_type,
+                           tuple(f"{prefix}{field}.{axis}" for axis in "xyz"),
+                           ("x", "y", "z"), units, group="Command")
+                 for name, field, units in (("Command linear velocity", "linear", "m/s"),
+                                            ("Command angular velocity", "angular", "rad/s")))

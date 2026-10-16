@@ -17,6 +17,83 @@ ROS_AVAILABLE = all(importlib.util.find_spec(name) for name in
 
 @unittest.skipUnless(ROS_AVAILABLE, "Source ROS2 to run MCAP integration tests")
 class RosIntegrationTests(unittest.TestCase):
+    def test_multicamera_scan_command_disk_roundtrip(self):
+        import rosbag2_py
+        import cv2
+        from rclpy.serialization import serialize_message
+        from sensor_msgs.msg import Image, CompressedImage, LaserScan
+        from geometry_msgs.msg import Twist, TwistStamped
+        config = ViewerConfig(series=(), motor_topic=None, pose_topic=None, image_topic="/a")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = str(Path(tmp) / "bag")
+            writer = rosbag2_py.SequentialWriter()
+            writer.open(rosbag2_py.StorageOptions(uri=path, storage_id="mcap"),
+                        rosbag2_py.ConverterOptions("cdr", "cdr"))
+            topics = (("/a", "sensor_msgs/msg/Image"), ("/b", "sensor_msgs/msg/Image"),
+                      ("/compressed", "sensor_msgs/msg/CompressedImage"),
+                      ("/scan", "sensor_msgs/msg/LaserScan"), ("/cmd_vel", "geometry_msgs/msg/Twist"),
+                      ("/stamped", "geometry_msgs/msg/TwistStamped"))
+            for i, (name, kind) in enumerate(topics):
+                writer.create_topic(rosbag2_py.TopicMetadata(id=i, name=name, type=kind, serialization_format="cdr"))
+            for i, topic in enumerate(("/a", "/b")):
+                msg = Image()
+                msg.header.stamp.sec = 100
+                msg.header.stamp.nanosec = i * 100_000_000
+                msg.width = msg.height = msg.step = 1
+                msg.encoding = "mono8"
+                msg.data = [20 + i]
+                writer.write(topic, serialize_message(msg), 100_000_000_000 + i * 100_000_000)
+            compressed = CompressedImage()
+            compressed.header.stamp.sec = 100
+            compressed.format = "png"
+            ok, encoded = cv2.imencode(".png", np.array([[[0, 0, 255]]], dtype=np.uint8))
+            self.assertTrue(ok)
+            compressed.data = encoded.tobytes()
+            writer.write("/compressed", serialize_message(compressed), 100_200_000_000)
+            scan = LaserScan()
+            scan.header.stamp.sec = 100
+            scan.header.stamp.nanosec = 50_000_000
+            scan.header.frame_id = "laser"
+            scan.angle_increment = np.pi / 2
+            scan.range_min, scan.range_max = 0.1, 12.0
+            scan.ranges = [1.0, 2.0, float("inf"), float("nan")]
+            writer.write("/scan", serialize_message(scan), 100_300_000_000)
+            cmd = Twist()
+            cmd.linear.x, cmd.angular.z = 0.5, -0.3
+            writer.write("/cmd_vel", serialize_message(cmd), 100_400_000_000)
+            stamped = TwistStamped()
+            stamped.header.stamp.sec = 101
+            stamped.twist = cmd
+            writer.write("/stamped", serialize_message(stamped), 102_000_000_000)
+            del writer
+            source = BagDataSource(config)
+            try:
+                source.load(path)
+                self.assertEqual(set(source.cameras), {"/a", "/b", "/compressed"})
+                self.assertIs(source.images, source.cameras["/a"])
+                self.assertEqual(source.cameras["/b"].index_at(0.05), -1)
+                self.assertEqual(source.cameras["/b"].frame(0)[0, 0, 0], 21)
+                np.testing.assert_array_equal(source.cameras["/compressed"].frame(0)[0, 0], [255, 0, 0])
+                self.assertLessEqual(sum(c.cache_bytes for c in source.cameras.values()), config.cache_bytes)
+                self.assertEqual(source.scan.index_at(0.04), -1)
+                self.assertEqual(source.scan.index_at(0.06), 0)
+                np.testing.assert_allclose(source.scan.frame(0).x, [1, 0], atol=1e-6)
+                np.testing.assert_allclose(source.scan.frame(0).y, [0, 2], atol=1e-6)
+                self.assertEqual(source.series[0].spec.group, "Command")
+                np.testing.assert_allclose(source.series[0].time, [0.4])
+                np.testing.assert_allclose(source.series[0].values[0], [0.5, 0, 0])
+                handles = [c.spool for c in source.cameras.values()] + [source.scan.spool]
+            finally:
+                source.close()
+            self.assertTrue(all(f.closed for f in handles))
+            stamped_source = BagDataSource(replace(config, scan_topic=None, cmd_vel_topic="/stamped"))
+            try:
+                stamped_source.load(path)
+                self.assertIsNone(stamped_source.scan)
+                np.testing.assert_allclose(stamped_source.series[0].time, [1])
+            finally:
+                stamped_source.close()
+
     def test_pose_autodetection_relative_time_and_invalid_quaternion(self):
         import rosbag2_py
         from rclpy.serialization import serialize_message
@@ -167,8 +244,12 @@ class RosIntegrationTests(unittest.TestCase):
             with self.assertRaises(InterruptedError):
                 BagDataSource(config).load(path, cancelled=lambda: True)
             bad = BagDataSource(replace(config, image_topic="/missing"))
-            with self.assertRaisesRegex(ValueError, "/missing"):
+            try:
                 bad.load(path)
+                self.assertIs(bad.images, bad.cameras[config.image_topic])
+                self.assertTrue(any("Default camera unavailable" in text for text in bad.warnings))
+            finally:
+                bad.close()
 
 
 if __name__ == "__main__":

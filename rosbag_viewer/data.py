@@ -14,7 +14,7 @@ from typing import Callable
 
 import numpy as np
 
-from .config import SeriesSpec, ViewerConfig, motor_series, pose_series
+from .config import SeriesSpec, ViewerConfig, motor_series, pose_series, command_series
 
 
 def sensor_timestamp(msg, record_ns: int, mode: str) -> tuple[int, bool]:
@@ -136,12 +136,62 @@ class ImageSource:
         self.spool.close()
 
 
+@dataclass
+class ScanFrame:
+    x: np.ndarray
+    y: np.ndarray
+    frame_id: str
+    range_max: float
+    total_rays: int
+
+
+def scan_frame(msg):
+    ranges = np.asarray(msg.ranges, dtype=np.float64)
+    angles = msg.angle_min + np.arange(len(ranges)) * msg.angle_increment
+    valid = (np.isfinite(ranges) & np.isfinite(angles) &
+             (ranges >= msg.range_min) & (ranges <= msg.range_max))
+    return ScanFrame(ranges[valid] * np.cos(angles[valid]),
+                     ranges[valid] * np.sin(angles[valid]), msg.header.frame_id,
+                     float(msg.range_max), len(ranges))
+
+
+class ScanSource:
+    """Disk-backed LaserScan messages with a single decoded scan cache."""
+    def __init__(self, spool, timestamps, records, offsets, lengths, decoder):
+        self.spool, self.timestamps, self.record_ns = spool, timestamps, records
+        self.offsets, self.lengths, self.decoder = offsets, lengths, decoder
+        self.last_index = None
+        self.last_frame = None
+
+    def index_at(self, time_s):
+        return int(np.searchsorted(self.timestamps, time_s, side="right")) - 1
+
+    def frame(self, index):
+        if index < 0 or index >= len(self.timestamps):
+            return None
+        if index != self.last_index:
+            self.spool.seek(int(self.offsets[index]))
+            raw = self.spool.read(int(self.lengths[index]))
+            if len(raw) != self.lengths[index]:
+                raise OSError("Incomplete scan cache read")
+            frame = self.decoder(raw)
+            self.last_frame, self.last_index = frame, index
+        return self.last_frame
+
+    def close(self):
+        self.last_frame = None
+        self.last_index = None
+        self.spool.close()
+
+
 class BagDataSource:
     def __init__(self, config: ViewerConfig):
         self.config = config
         self.topics = {}
         self.series = []
         self.images = None
+        self.cameras = {}
+        self.scan = None
         self.origin_ns = 0
         self.duration = 0.0
         self.warnings = []
@@ -170,7 +220,22 @@ class BagDataSource:
             names = {s.name for s in specs}
             specs.extend(s for s in pose_series(self.config.pose_topic, self.topics[self.config.pose_topic])
                          if s.name not in names)
-        expected = {self.config.image_topic: "sensor_msgs/msg/Image"}
+        if self.config.cmd_vel_topic in self.topics:
+            names = {s.name for s in specs}
+            specs.extend(s for s in command_series(self.config.cmd_vel_topic, self.topics[self.config.cmd_vel_topic])
+                         if s.name not in names)
+        camera_types = {topic: kind for topic, kind in self.topics.items()
+                        if kind in ("sensor_msgs/msg/Image", "sensor_msgs/msg/CompressedImage")}
+        if not camera_types:
+            raise ValueError("No Image or CompressedImage camera topic found")
+        primary = self.config.image_topic
+        if primary not in camera_types:
+            primary = next(iter(camera_types))
+            self.warnings.append(f"Default camera unavailable; selected {primary}")
+        scan_topic = self.config.scan_topic if self.config.scan_topic in self.topics else None
+        expected = dict(camera_types)
+        if scan_topic:
+            expected[scan_topic] = "sensor_msgs/msg/LaserScan"
         for spec in specs:
             if spec.topic in expected and expected[spec.topic] != spec.message_type:
                 raise ValueError(f"Conflicting types for {spec.topic}")
@@ -182,12 +247,16 @@ class BagDataSource:
                 raise ValueError(f"{topic}: expected {kind}, found {actual}\n\n{available}")
         types = {t: get_message(kind) for t, kind in expected.items()}
         reader.set_filter(rosbag2_py.StorageFilter(topics=list(expected)))
-        spool = tempfile.TemporaryFile(dir=self.config.temp_dir)
-        image_rows = []
+        spools = {}
+        stream_rows = {topic: [] for topic in camera_types}
+        if scan_topic:
+            stream_rows[scan_topic] = []
         rows = [[] for _ in specs]
         json_topics = {s.topic for s in specs if s.payload == "json"}
         count = fallback_count = malformed_count = 0
         try:
+            for topic in stream_rows:
+                spools[topic] = tempfile.TemporaryFile(dir=self.config.temp_dir)
             while reader.has_next():
                 if cancelled():
                     raise InterruptedError("Loading cancelled")
@@ -195,10 +264,11 @@ class BagDataSource:
                 msg = deserialize_message(raw, types[topic])
                 stamp_ns, fallback = sensor_timestamp(msg, record_ns, self.config.timestamp_mode)
                 fallback_count += fallback
-                if topic == self.config.image_topic:
+                if topic in stream_rows:
+                    spool = spools[topic]
                     offset = spool.tell()
                     spool.write(raw)
-                    image_rows.append((stamp_ns, record_ns, offset, len(raw)))
+                    stream_rows[topic].append((stamp_ns, record_ns, offset, len(raw)))
                 payload = None
                 if topic in json_topics:
                     try:
@@ -214,15 +284,35 @@ class BagDataSource:
                                         series_values(payload if spec.payload == "json" else msg, spec)))
                 count += 1
                 if count % 500 == 0:
-                    progress(f"Scanning: {count:,} messages / image cache {spool.tell()/2**20:.1f} MiB")
-            if not image_rows:
-                raise ValueError("선택한 카메라 토픽에 프레임이 없습니다.")
-            # Subtract integer nanoseconds before conversion to avoid epoch precision loss.
-            self.origin_ns = min([min(r[0] for r in image_rows)] +
-                                 [min(r[0] for r in samples) for samples in rows if samples])
-            image_rows.sort(key=lambda r: r[0])  # stable for duplicate sensor timestamps
-            index = np.asarray(image_rows, dtype=np.int64)
-            times = (index[:, 0] - self.origin_ns).astype(np.float64) * 1e-9
+                    progress(f"Scanning: {count:,} messages / media cache {sum(f.tell() for f in spools.values())/2**20:.1f} MiB")
+            populated = [topic for topic in camera_types if stream_rows[topic]]
+            if not populated:
+                raise ValueError("카메라 토픽에 프레임이 없습니다.")
+            if primary not in populated:
+                primary = populated[0]
+            # Subtract integer nanoseconds before converting to relative seconds.
+            self.origin_ns = min(min(r[0] for r in samples)
+                                 for samples in [*stream_rows.values(), *rows] if samples)
+            stream_ends = []
+            for topic, samples in stream_rows.items():
+                if not samples:
+                    self.warnings.append(f"No samples: {topic}")
+                    spools[topic].close()
+                    continue
+                samples.sort(key=lambda r: r[0])
+                index = np.asarray(samples, dtype=np.int64)
+                times = (index[:, 0] - self.origin_ns).astype(np.float64) * 1e-9
+                stream_ends.append(float(times[-1]))
+                spools[topic].flush()
+                args = (spools[topic], times, index[:, 1], index[:, 2], index[:, 3])
+                if topic == scan_topic:
+                    message_type = types[topic]
+                    self.scan = ScanSource(*args, lambda raw, kind=message_type:
+                                           scan_frame(deserialize_message(raw, kind)))
+                else:
+                    self.cameras[topic] = ImageSource(*args, self._decoder(types[topic]),
+                                                      self.config.cache_bytes // len(populated))
+            self.images = self.cameras[primary]  # backward-compatible default stream
             for spec, samples in zip(specs, rows):
                 samples.sort(key=lambda r: r[0])
                 if not samples:
@@ -232,19 +322,19 @@ class BagDataSource:
                     spec, (stamps - self.origin_ns).astype(np.float64) * 1e-9,
                     np.asarray([r[2] for r in samples], dtype=np.float64).reshape(-1, len(spec.labels)),
                     np.asarray([r[1] for r in samples], dtype=np.int64)))
-            self.duration = max([float(times[-1])] +
+            self.duration = max(stream_ends +
                                 [float(s.time[-1]) for s in self.series if len(s.time)])
             if fallback_count:
                 self.warnings.append(f"{fallback_count:,} messages used record timestamps (missing/zero header)")
             if malformed_count:
                 self.warnings.append(f"{malformed_count:,} invalid JSON messages shown as gaps")
-            spool.flush()
-            self.images = ImageSource(spool, times, index[:, 1], index[:, 2], index[:, 3],
-                                      self._decoder(types[self.config.image_topic]), self.config.cache_bytes)
-            progress(f"Loaded {count:,} messages; {len(times):,} frames")
+            frame_count = sum(len(source.timestamps) for source in self.cameras.values())
+            progress(f"Loaded {count:,} messages; {frame_count:,} frames / {len(self.cameras)} cameras")
             return self
         except BaseException:
-            spool.close()
+            self.close()
+            for spool in spools.values():
+                spool.close()
             raise
         finally:
             del reader
@@ -262,6 +352,8 @@ class BagDataSource:
             if bridge is None:
                 bridge = CvBridge()
             msg = deserialize_message(raw, message_type)
+            if not hasattr(msg, "encoding"):
+                return bridge.compressed_imgmsg_to_cv2(msg, "rgb8")
             if msg.encoding in ("mono8", "8UC1"):
                 return cv2.cvtColor(bridge.imgmsg_to_cv2(msg, "passthrough"), cv2.COLOR_GRAY2RGB)
             if msg.encoding in ("mono16", "16UC1"):
@@ -271,6 +363,10 @@ class BagDataSource:
         return decode
 
     def close(self):
-        if self.images is not None:
-            self.images.close()
-            self.images = None
+        for source in self.cameras.values():
+            source.close()
+        self.cameras.clear()
+        self.images = None
+        if self.scan is not None:
+            self.scan.close()
+            self.scan = None
