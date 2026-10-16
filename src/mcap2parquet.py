@@ -41,22 +41,43 @@ def main():
     accel_data = []
     pose_data = []
     # image_data = []
-    # motor_data = []
+    motor_data = []
+    cmd_vel_data = []
 
     bridge = CvBridge()
 
     while reader.has_next():
         topic, data, timestamp = reader.read_next()
 
-        # if topic == "/motor_bridge_node/status":
-        #     msg_type = get_message("std_msgs/msg/String")
-        #     msg = deserialize_message(data, msg_type)
-        #     motor_data.append(
-        #         {
-        #             "timestamp": timestamp * 1e-9,  # Convert nanoseconds to seconds
-        #             "message": msg.data,
-        #         }
-        #     )
+        if topic == "/motor_bridge_node/status":
+            msg_type = get_message("std_msgs/msg/String")
+            msg = deserialize_message(data, msg_type)
+            motor_data.append(
+                {
+                    "timestamp": timestamp * 1e-9,  # Convert nanoseconds to seconds
+                    "message": msg.data,
+                }
+            )
+
+        if topic == "/cmd_vel":
+            msg_type = get_message("geometry_msgs/msg/Twist")
+            msg = deserialize_message(data, msg_type)
+            cmd_vel_data.append(
+                {
+                    "timestamp": timestamp * 1e-9,  # Convert nanoseconds to seconds
+                    "linear": {
+                        "x": msg.linear.x,
+                        "y": msg.linear.y,
+                        "z": msg.linear.z,
+                    },
+                    "angular": {
+                        "x": msg.angular.x,
+                        "y": msg.angular.y,
+                        "z": msg.angular.z,
+                    },
+                }
+            )
+            continue
 
         # if topic == "/camera/fisheye1/image_raw":
         #     msg_type = get_message("sensor_msgs/msg/Image")
@@ -70,6 +91,7 @@ def main():
         #         }
         #     )
         #     continue
+
         if topic == "/camera/gyro/sample":
             msg_type = get_message("sensor_msgs/msg/Imu")
             msg = deserialize_message(data, msg_type)
@@ -144,7 +166,8 @@ def main():
     save_to_parquet(gyro_data, f"rosbag_data/gyro_data_{date_code}.parquet")
     save_to_parquet(accel_data, f"rosbag_data/accel_data_{date_code}.parquet")
     save_to_parquet(pose_data, f"rosbag_data/pose_data_{date_code}.parquet")
-    # save_to_parquet(motor_data, f"rosbag_data/motor_data_{date_code}.parquet")
+    save_to_parquet(motor_data, f"rosbag_data/motor_data_{date_code}.parquet")
+    save_to_parquet(cmd_vel_data, f"rosbag_data/cmd_vel_data_{date_code}.parquet")
 
 
 if __name__ == "__main__":
