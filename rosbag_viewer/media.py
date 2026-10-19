@@ -224,6 +224,7 @@ class ScanView(QWidget):
         self.plot.setXRange(-12, 12, padding=0)
         self.plot.setYRange(-12, 12, padding=0)
         layout.addWidget(self.plot, 1, Qt.AlignmentFlag.AlignHCenter)
+        self.flip_y.setChecked(True)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
