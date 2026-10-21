@@ -6,7 +6,7 @@ from matplotlib import pyplot as plt
 
 # Settings: edit this section to choose the recording, interval and figures.
 DATA_DIR = Path("rosbag_data")
-RECORDING = "2026-10-15_1"
+RECORDING = "2026-10-21_1"
 START_SEC = 38
 END_SEC = 400  # Exclusive; use None to keep the rest of the recording.
 PLOT_GROUPS = {"status", "timing", "command", "pose", "wheels"}
@@ -179,6 +179,30 @@ def plot_wheel_rpm(frame, timestamps):
     figure.savefig(f"img/wheel_rpm_{RECORDING}.png", dpi=300)
 
 
+def plot_wheel_odometry(frame, timestamps):
+    figure, axes = make_axes(10, rows=2)
+    wheel_pairs = (
+        (("lf", "left front"), ("rf", "right front")),
+        (("lr", "left rear"), ("rr", "right rear")),
+    )
+    for index, (ax, pair) in enumerate(zip(axes, wheel_pairs)):
+        for wheel, label in pair:
+            values = frame["message"].apply(
+                lambda message: message["wheels"][wheel]["encoder_count"]
+            )
+            values = values - values.iloc[0]  # Normalize to start from zero
+            ax.plot(timestamps, values, alpha=0.5, label=label)
+        label_axes(
+            ax,
+            "Wheel Odometry Over Time" if index == 0 else "",
+            "Odometry",
+            xlabel="" if index == 0 else "Timestamp (s)",
+        )
+        ax.legend()
+    figure.tight_layout()
+    figure.savefig(f"img/wheel_odometry_{RECORDING}.png", dpi=300)
+
+
 def plot_wheel_amp(frame, timestamps):
     figure, axes = make_axes(10, rows=2)
     wheel_pairs = (
@@ -244,8 +268,9 @@ def main():
         plot_pose_velocity(frames["pose"], times["pose"])
     if "wheels" in PLOT_GROUPS:
         plot_wheel_rpm(frames["motor"], times["motor"])
-        plot_wheel_amp(frames["motor"], times["motor"])
-        plot_wheel_output(frames["motor"], times["motor"])
+        plot_wheel_odometry(frames["motor"], times["motor"])
+        # plot_wheel_amp(frames["motor"], times["motor"])
+        # plot_wheel_output(frames["motor"], times["motor"])
     plt.show()
 
 
