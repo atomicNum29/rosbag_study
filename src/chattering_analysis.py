@@ -25,6 +25,14 @@ SOURCES = {
     "cmd_vel": (f"cmd_vel_data_{RECORDING}.parquet", "timestamp"),
     "motor": (f"motor_data_{RECORDING}.parquet", "timestamp"),
     "pose": (f"pose_data_{RECORDING}.parquet", "sensor_time"),
+    "accel": (f"accel_data_{RECORDING}.parquet", "sensor_time"),
+    "gyro": (f"gyro_data_{RECORDING}.parquet", "sensor_time"),
+}
+# Keep the original interval origin stable when adding earlier sensor samples.
+TIME_ORIGIN_TOPICS = ("cmd_vel", "motor", "pose")
+IMU_SIGNALS = {
+    "accel": ("linear_acceleration", "m/s²", "Acceleration"),
+    "gyro": ("angular_velocity", "rad/s", "Gyroscope angular velocity"),
 }
 COLORS = list(plt.get_cmap("tab20")(np.arange(20))) + list(
     plt.get_cmap("tab20b")(np.arange(9))
@@ -41,7 +49,7 @@ def load_data():
         name: pd.read_parquet(DATA_DIR / filename, engine="pyarrow")
         for name, (filename, _) in SOURCES.items()
     }
-    t0 = min(frames[name][column].min() for name, (_, column) in SOURCES.items())
+    t0 = min(frames[name][SOURCES[name][1]].min() for name in TIME_ORIGIN_TOPICS)
     for name, (_, column) in SOURCES.items():
         frames[name] = frames[name].sort_values(column).reset_index(drop=True)
         frames[name]["elapsed_sec"] = frames[name][column] - t0
@@ -100,6 +108,92 @@ def check_commands(segments):
     return report
 
 
+def plot_segment_histograms(segments):
+    """Compare per-signal distributions using shared bins and density axes.
+
+    Statistics use finite samples, with sample standard deviation (ddof=1).
+    No detrending or resampling is applied. Invalid counts remain in the report.
+    """
+    output = OUTPUT_DIR / "histograms"
+    output.mkdir(parents=True, exist_ok=True)
+    signals = []
+    for topic in ("cmd_vel", "pose"):
+        for field, unit in (("linear", "m/s"), ("angular", "rad/s")):
+            for component in "xyz":
+                signals.append((topic, f"{field}.{component}", unit,
+                                lambda row, t=topic, f=field, c=component:
+                                (row["twist"] if t == "pose" else row)[f][c]))
+    for wheel in ("lf", "rf", "lr", "rr"):
+        signals.append(("motor", f"{wheel}.rpm", "RPM",
+                        lambda row, w=wheel: row["message"]["wheels"][w]["rpm"]))
+    for topic, (field, unit, _) in IMU_SIGNALS.items():
+        for component in "xyz":
+            signals.append((topic, f"{field}.{component}", unit,
+                            lambda row, f=field, c=component: row[f][c]))
+
+    records = []
+    # Materialize nested records once per topic and interval.
+    rows = {topic: [s["topics"][topic].to_dict("records") for s in segments]
+            for topic in SOURCES}
+    for topic, signal, unit, extract in signals:
+        samples = []
+        stats = []
+        for segment, topic_rows in zip(segments, rows[topic]):
+            raw = np.asarray([extract(row) for row in topic_rows], dtype=float)
+            values = raw[np.isfinite(raw)]
+            samples.append(values)
+            mean = float(values.mean()) if len(values) else np.nan
+            std = (0.0 if np.ptp(values) == 0 else float(values.std(ddof=1))) \
+                if len(values) >= 2 else np.nan
+            record = dict(number=segment["number"], start=segment["start"],
+                          end=segment["end"], topic=topic, signal=signal, unit=unit,
+                          samples=len(raw), finite_samples=len(values),
+                          invalid_samples=len(raw) - len(values), mean=mean,
+                          std=std, ddof=1)
+            records.append(record)
+            stats.append(record)
+        pooled = np.concatenate(samples)
+        if len(pooled):
+            low, high = float(pooled.min()), float(pooled.max())
+            if low == high:
+                padding = max(abs(low) * 0.01, 0.01)
+                low, high = low - padding, high + padding
+        else:
+            low, high = -0.5, 0.5
+        bins = np.linspace(low, high, 41)
+        figure, axes = plt.subplots(int(np.ceil(len(segments) / 5)), 5,
+                                    figsize=(20, 16), sharex=True, sharey=True,
+                                    squeeze=False)
+        for ax, segment, values, stat in zip(axes.flat, segments, samples, stats):
+            color = COLORS[(segment["number"] - 1) % len(COLORS)]
+            if len(values):
+                ax.hist(values, bins=bins, density=True, color=color,
+                        edgecolor="white", linewidth=0.3, alpha=0.85)
+                ax.axvline(stat["mean"], color="black", linestyle="--", linewidth=0.8)
+            else:
+                ax.text(0.5, 0.5, "No finite samples", transform=ax.transAxes,
+                        ha="center")
+            ax.set_title(f'{segment["number"]:02d}: {segment["start"]:g}–{segment["end"]:g} s\n'
+                         f'n={len(values)}  mean={stat["mean"]:.4g}  std={stat["std"]:.4g}',
+                         fontsize=9)
+            ax.set_xlim(low, high)
+            ax.tick_params(axis="both", labelsize=8, labelbottom=True)
+            ax.grid(axis="y", alpha=0.2)
+        for ax in list(axes.flat)[len(segments):]:
+            ax.set_visible(False)
+        figure.suptitle(f"{topic}: {signal} — interval distributions\n"
+                        "Shared bins and axes; dashed line = mean; sample std (ddof=1)")
+        figure.supxlabel(f"{signal} ({unit})")
+        figure.supylabel("Probability density")
+        figure.tight_layout(rect=(0.02, 0.02, 1, 0.96))
+        figure.savefig(output / f"{topic}_{signal.replace('.', '_')}.png", dpi=150)
+        plt.close(figure)
+    report = pd.DataFrame(records)
+    report.to_csv(OUTPUT_DIR / "segment_statistics.csv", index=False)
+    print(f"Saved {len(signals)} histogram figures and segment_statistics.csv")
+    return report
+
+
 def plot_segments(segments, topic, panels, filename, title):
     figure, axes = plt.subplots(len(panels), 1, figsize=(18, 9), sharex=True,
                                 squeeze=False)
@@ -151,7 +245,8 @@ def plot_segments(segments, topic, panels, filename, title):
     return figure
 
 
-def plot_full_recording(frame, segments, topic, panels, filename, title, time_end):
+def plot_full_recording(frame, segments, topic, panels, filename, title, time_end,
+                        time_start=0):
     """Draw every sample on the original time axis, marking only selected samples."""
     figure, axes = plt.subplots(len(panels), 1, figsize=(18, 9), sharex=True,
                                 squeeze=False)
@@ -176,7 +271,7 @@ def plot_full_recording(frame, segments, topic, panels, filename, title, time_en
         ax.set_ylabel(ylabel)
         ax.grid(True, alpha=0.25)
         ax.legend(handles=handles, loc="upper right")
-    axes[-1, 0].set(xlim=(0, time_end), xlabel="Recording time (s)")
+    axes[-1, 0].set(xlim=(time_start, time_end), xlabel="Recording time (s)")
     handles = [Line2D([], [], linestyle="none", marker="o", markerfacecolor="none",
                       color=COLORS[(s["number"] - 1) % len(COLORS)],
                       label=f'{s["number"]:02d}: {s["start"]:g}-{s["end"]:g} s')
@@ -195,6 +290,7 @@ def main():
     if not segments:
         raise ValueError("No data in the selected intervals")
     check_commands(segments)
+    plot_segment_histograms(segments)
     # Persist the selected records with segment IDs and both time axes.
     for topic in SOURCES:
         pd.concat([s["topics"][topic] for s in segments], ignore_index=True).to_parquet(
@@ -205,6 +301,7 @@ def main():
             frames[topic], segments, topic, panels, f"{Path(filename).stem}_full.png",
             f"{title} — full recording with selected samples",
             max(frame["elapsed_sec"].max() for frame in frames.values()),
+            min(frame["elapsed_sec"].min() for frame in frames.values()),
         )
 
     plot_both("cmd_vel", [
@@ -226,7 +323,13 @@ def main():
             ("Rear", (("lr", "left rear", "-"), ("rr", "right rear", "--"))),
         )
     ], "rpm.png", "Wheel RPM")
-    print(f"Saved 6 figures, segmented data and command report to {OUTPUT_DIR}")
+    for topic, (field, unit, title) in IMU_SIGNALS.items():
+        plot_both(topic, [
+            (f"{component.upper()} ({unit})", [
+                (f"{field}.{component}", "-", lambda r, f=field, c=component: r[f][c])
+            ]) for component in "xyz"
+        ], f"{topic}.png", title)
+    print(f"Saved 10 time-series figures, segmented data and reports to {OUTPUT_DIR}")
     plt.show()
 
 
