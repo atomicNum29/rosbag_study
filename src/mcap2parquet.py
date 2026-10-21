@@ -5,6 +5,7 @@ from rosidl_runtime_py.utilities import get_message
 
 import cv2
 from cv_bridge import CvBridge
+import json
 
 date_code = "2026-10-15_1"
 bag_path = f"rosbag_data/rosbag_{date_code}"
@@ -55,7 +56,7 @@ def main():
             motor_data.append(
                 {
                     "timestamp": timestamp * 1e-9,  # Convert nanoseconds to seconds
-                    "message": msg.data,
+                    "message": json.loads(msg.data),
                 }
             )
 
